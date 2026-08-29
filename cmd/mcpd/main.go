@@ -213,7 +213,7 @@ func printUsage() {
 
 Usage:
   mcpd serve [--config PATH] [--listen ADDR]
-  mcpd setup [--domain HOST] [--yes] [--reconfigure]
+  mcpd setup [--domain HOST] [--https-ready] [--yes] [--reconfigure]
   mcpd install [--user USER] [--config PATH] [--no-enable] [--no-start]
   mcpd start | stop | restart | status
   mcpd logs [--follow] [--lines N] [--since TIME]

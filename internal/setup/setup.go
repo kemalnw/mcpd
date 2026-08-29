@@ -11,20 +11,27 @@ import (
 	"github.com/kemalnw/mcpd/internal/config"
 )
 
+type HTTPSMode string
+
+const (
+	HTTPSModeCaddy    HTTPSMode = "caddy"
+	HTTPSModeExternal HTTPSMode = "external"
+)
+
 type Input struct {
-	PublicOrigin    string
-	Listen          string
-	MCPPath         string
-	ServiceUser     string
-	OAuthEnabled    bool
-	HTTPSConfigured bool
+	PublicOrigin string
+	Listen       string
+	MCPPath      string
+	ServiceUser  string
+	OAuthEnabled bool
+	HTTPSMode    HTTPSMode
 }
 
 type Plan struct {
-	Config          config.Config
-	PublicOrigin    string
-	ServiceUser     string
-	HTTPSConfigured bool
+	Config       config.Config
+	PublicOrigin string
+	ServiceUser  string
+	HTTPSMode    HTTPSMode
 }
 
 func Build(input Input) (Plan, error) {
@@ -53,7 +60,14 @@ func BuildFrom(base config.Config, input Input) (Plan, error) {
 	if strings.TrimSpace(input.ServiceUser) == "" {
 		return Plan{}, errors.New("service user must not be empty")
 	}
-	return Plan{Config: cfg, PublicOrigin: origin, ServiceUser: input.ServiceUser, HTTPSConfigured: input.HTTPSConfigured}, nil
+	httpsMode := input.HTTPSMode
+	if httpsMode == "" {
+		httpsMode = HTTPSModeCaddy
+	}
+	if httpsMode != HTTPSModeCaddy && httpsMode != HTTPSModeExternal {
+		return Plan{}, fmt.Errorf("unsupported HTTPS mode %q", httpsMode)
+	}
+	return Plan{Config: cfg, PublicOrigin: origin, ServiceUser: input.ServiceUser, HTTPSMode: httpsMode}, nil
 }
 
 func canonicalOrigin(raw string) (string, error) {
@@ -72,6 +86,30 @@ func canonicalOrigin(raw string) (string, error) {
 		return "", err
 	}
 	return u.Scheme + "://" + u.Host, nil
+}
+
+func (p Plan) ManagedCaddy() bool { return p.HTTPSMode == HTTPSModeCaddy }
+
+func (p Plan) PublicHost() (string, error) {
+	u, err := url.Parse(p.PublicOrigin)
+	if err != nil {
+		return "", err
+	}
+	if u.Hostname() == "" {
+		return "", errors.New("public origin has no hostname")
+	}
+	return u.Hostname(), nil
+}
+
+func (p Plan) CaddyBackend() (string, error) {
+	host, port, err := net.SplitHostPort(p.Config.Server.Listen)
+	if err != nil {
+		return "", fmt.Errorf("parse backend listen address: %w", err)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 func (p Plan) PublicMCPURL() string {
@@ -98,8 +136,10 @@ type Executor interface {
 	Install(Plan) error
 	ConfigurePassword([]byte) error
 	Restart() error
-	Doctor() error
 	HealthCheck(context.Context, string) error
+	ConfigureFrontend(Plan) error
+	PublicHealthCheck(context.Context, Plan) error
+	Doctor() error
 }
 
 type ApplyOptions struct {
@@ -121,15 +161,21 @@ func Apply(ctx context.Context, plan Plan, opts ApplyOptions, exec Executor) err
 	if err := exec.Restart(); err != nil {
 		return fmt.Errorf("start service: %w", err)
 	}
-	if err := exec.Doctor(); err != nil {
-		return fmt.Errorf("doctor: %w", err)
-	}
 	healthURL, err := plan.HealthURL()
 	if err != nil {
 		return err
 	}
 	if err := exec.HealthCheck(ctx, healthURL); err != nil {
 		return fmt.Errorf("local health check: %w", err)
+	}
+	if err := exec.ConfigureFrontend(plan); err != nil {
+		return fmt.Errorf("configure HTTPS frontend: %w", err)
+	}
+	if err := exec.PublicHealthCheck(ctx, plan); err != nil {
+		return fmt.Errorf("public HTTPS check: %w", err)
+	}
+	if err := exec.Doctor(); err != nil {
+		return fmt.Errorf("doctor: %w", err)
 	}
 	return nil
 }

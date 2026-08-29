@@ -59,12 +59,14 @@ func (f *fakeExecutor) step(name string) error {
 	}
 	return nil
 }
-func (f *fakeExecutor) Preflight(Plan) error                      { return f.step("preflight") }
-func (f *fakeExecutor) Install(Plan) error                        { return f.step("install") }
-func (f *fakeExecutor) ConfigurePassword([]byte) error            { return f.step("password") }
-func (f *fakeExecutor) Restart() error                            { return f.step("restart") }
-func (f *fakeExecutor) Doctor() error                             { return f.step("doctor") }
-func (f *fakeExecutor) HealthCheck(context.Context, string) error { return f.step("health") }
+func (f *fakeExecutor) Preflight(Plan) error                          { return f.step("preflight") }
+func (f *fakeExecutor) Install(Plan) error                            { return f.step("install") }
+func (f *fakeExecutor) ConfigurePassword([]byte) error                { return f.step("password") }
+func (f *fakeExecutor) Restart() error                                { return f.step("restart") }
+func (f *fakeExecutor) Doctor() error                                 { return f.step("doctor") }
+func (f *fakeExecutor) HealthCheck(context.Context, string) error     { return f.step("health") }
+func (f *fakeExecutor) ConfigureFrontend(Plan) error                  { return f.step("frontend") }
+func (f *fakeExecutor) PublicHealthCheck(context.Context, Plan) error { return f.step("public-health") }
 
 func TestApplyRunsCompleteSetupSequence(t *testing.T) {
 	plan, err := Build(Input{PublicOrigin: "mcp.example.com", ServiceUser: "alice", OAuthEnabled: true})
@@ -75,7 +77,7 @@ func TestApplyRunsCompleteSetupSequence(t *testing.T) {
 	if err := Apply(context.Background(), plan, ApplyOptions{Password: []byte("12345678")}, fake); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(fake.calls, ","); got != "preflight,install,password,restart,doctor,health" {
+	if got := strings.Join(fake.calls, ","); got != "preflight,install,password,restart,health,frontend,public-health,doctor" {
 		t.Fatalf("calls = %q", got)
 	}
 }
@@ -84,7 +86,7 @@ func TestApplyStopsAtFailedStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, stage := range []string{"preflight", "install", "password", "restart", "doctor", "health"} {
+	for _, stage := range []string{"preflight", "install", "password", "restart", "health", "frontend", "public-health", "doctor"} {
 		t.Run(stage, func(t *testing.T) {
 			fake := &fakeExecutor{failAt: stage}
 			err := Apply(context.Background(), plan, ApplyOptions{Password: []byte("12345678")}, fake)
@@ -106,5 +108,33 @@ func TestApplyDoesNotReplacePasswordWhenNoneProvided(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(fake.calls, ","), "password") {
 		t.Fatalf("password unexpectedly changed: %v", fake.calls)
+	}
+}
+
+func TestBuildDefaultsToManagedCaddy(t *testing.T) {
+	plan, err := Build(Input{PublicOrigin: "mcp.example.com", ServiceUser: "alice", OAuthEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.ManagedCaddy() || plan.HTTPSMode != HTTPSModeCaddy {
+		t.Fatalf("HTTPS mode = %q", plan.HTTPSMode)
+	}
+	host, err := plan.PublicHost()
+	if err != nil || host != "mcp.example.com" {
+		t.Fatalf("public host = %q, err=%v", host, err)
+	}
+	backend, err := plan.CaddyBackend()
+	if err != nil || backend != "127.0.0.1:31354" {
+		t.Fatalf("Caddy backend = %q, err=%v", backend, err)
+	}
+}
+
+func TestBuildSupportsExternalHTTPSFrontend(t *testing.T) {
+	plan, err := Build(Input{PublicOrigin: "mcp.example.com", ServiceUser: "alice", OAuthEnabled: true, HTTPSMode: HTTPSModeExternal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ManagedCaddy() || plan.HTTPSMode != HTTPSModeExternal {
+		t.Fatalf("HTTPS mode = %q", plan.HTTPSMode)
 	}
 }
