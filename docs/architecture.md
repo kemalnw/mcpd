@@ -143,6 +143,25 @@ daemon supervisor. `doctor` checks installation layout, unit syntax, service
 identity, state permissions, privileged-port/socket consistency, OAuth password
 state, TLS prerequisites, and service activity.
 
+## Release supply-chain model
+
+Release tags are built by `.github/workflows/release.yml` only when the tagged
+commit is reachable from `main`. Linux amd64 and arm64 binaries are cross-built
+with `CGO_ENABLED=0`, fixed linker metadata, `-trimpath`, and deterministic tar/gzip
+metadata. `checksums.txt` binds the downloadable archives and installer to SHA-256.
+
+Every release artifact and the checksum manifest receives a keyless Sigstore/Cosign
+bundle using the GitHub Actions OIDC identity of the exact release workflow/tag.
+GitHub `actions/attest` additionally publishes signed build provenance for subjects
+listed in the checksum manifest. The workflow verifies its own Cosign bundles before
+creating the GitHub Release, so signing failures cannot silently publish unsigned
+assets.
+
+The user-facing installer downloads only over HTTPS by default, verifies the selected
+archive against `checksums.txt`, rejects unexpected archive paths, and uses `sudo`
+only for the final installation write when needed. Signature verification is automatic
+when Cosign is available and can be made mandatory with `MCPD_REQUIRE_SIGNATURE=1`.
+
 ## Process model
 
 `start_process` creates an OS process immediately and registers a managed

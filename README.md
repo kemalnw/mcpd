@@ -14,9 +14,9 @@ the Unix user running `mcpd`. Run it as an ordinary user for that user's access,
 or run it as `root` when full operating-system access is the intended behavior.
 
 > **Status:** early development. Process/terminal, native text/filesystem, progressive
-> search, OAuth 2.1/CIMD, HTTPS/TLS, and systemd lifecycle management are
-> implemented. Structured document handlers and release packaging remain on the
-> roadmap.
+> search, OAuth 2.1/CIMD, HTTPS/TLS, systemd lifecycle management, and signed
+> release automation are implemented. Structured document handlers remain
+> deferred until after the MVP.
 
 ## Design goals
 
@@ -138,6 +138,20 @@ http://127.0.0.1:8787/mcp
 For local development, `auth.enabled = false` and `tls.mode = "off"` keep the
 endpoint on plain HTTP. Public deployments should enable OAuth and HTTPS together.
 
+## Install from a release
+
+Install the latest Linux `amd64`/`arm64` binary from the signed GitHub Release:
+
+```bash
+curl -fsSL https://github.com/kemalnw/mcpd/releases/latest/download/install.sh | sh
+```
+
+The installer verifies SHA-256 before extraction. If `cosign` is installed it also
+verifies the Sigstore identity of the release checksum manifest; set
+`MCPD_REQUIRE_SIGNATURE=1` to require that verification. Then install the systemd
+service with `sudo mcpd install`. See [`docs/releases.md`](docs/releases.md) for
+artifact names, manual verification, provenance, and the maintainer release flow.
+
 ## OAuth and HTTPS
 
 `mcpd` contains both the OAuth authorization server and MCP resource server. It
@@ -253,7 +267,7 @@ See [`configs/mcpd.example.toml`](configs/mcpd.example.toml).
 4. ⏸️ Image, Excel, DOCX, and PDF handlers — deferred until after the MVP.
 5. ✅ OAuth 2.1/CIMD, scoped tool authorization, and TLS/ACME for public-IP endpoints.
 6. ✅ `mcpd install/start/stop/restart/status/logs/doctor` with systemd and privileged-port socket activation.
-7. ⏳ Release automation, signed artifacts, checksums, and install script.
+7. ✅ Reproducible release automation, Sigstore-signed artifacts, provenance, checksums, and install script.
 
 See [`docs/architecture.md`](docs/architecture.md) for the package boundaries
 and engineering decisions behind the project.
