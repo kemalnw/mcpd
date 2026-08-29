@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/creack/pty v1.1.24
 	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/pelletier/go-toml/v2 v2.2.4
+	github.com/pelletier/go-toml/v2 v2.4.3
 )
 
 require (
