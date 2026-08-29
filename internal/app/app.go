@@ -12,8 +12,10 @@ import (
 	"github.com/kemalnw/mcpd/internal/audit"
 	"github.com/kemalnw/mcpd/internal/config"
 	fsmgr "github.com/kemalnw/mcpd/internal/filesystem"
+	oauthsrv "github.com/kemalnw/mcpd/internal/oauth"
 	processmgr "github.com/kemalnw/mcpd/internal/process"
 	searchmgr "github.com/kemalnw/mcpd/internal/search"
+	"github.com/kemalnw/mcpd/internal/tlsmgr"
 	"github.com/kemalnw/mcpd/internal/tools"
 	"github.com/kemalnw/mcpd/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -26,13 +28,20 @@ type App struct {
 	processes *processmgr.Manager
 	files     *fsmgr.Manager
 	searches  *searchmgr.Manager
+	oauth     *oauthsrv.Server
+	tls       *tlsmgr.Manager
 	mcp       *mcp.Server
 	http      *http.Server
+
+	renewCancel context.CancelFunc
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	auditStore, err := audit.Open(cfg.Audit.Enabled, cfg.Audit.Path)
 	if err != nil {
@@ -66,6 +75,38 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		_ = auditStore.Close()
 		return nil, err
 	}
+	cleanup := func() {
+		_ = searches.Close()
+		_ = processes.Close()
+		_ = auditStore.Close()
+	}
+
+	var authServer *oauthsrv.Server
+	if cfg.Auth.Enabled {
+		authServer, err = oauthsrv.NewServer(oauthsrv.Options{
+			IssuerURL: cfg.Auth.ExternalURL, ResourceURL: cfg.Auth.ExternalURL + cfg.Server.MCPPath, StateDir: cfg.Auth.StateDir,
+			AccessTokenTTL:        time.Duration(cfg.Auth.AccessTokenSeconds) * time.Second,
+			AuthorizationCodeTTL:  time.Duration(cfg.Auth.AuthorizationCodeSeconds) * time.Second,
+			LoginSessionTTL:       time.Duration(cfg.Auth.LoginSessionSeconds) * time.Second,
+			ClientMetadataTimeout: time.Duration(cfg.Auth.ClientMetadataTimeoutSeconds) * time.Second,
+			Logger:                logger,
+		})
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("initialize OAuth server: %w", err)
+		}
+	}
+
+	tlsManager, err := tlsmgr.New(tlsmgr.Options{
+		Mode: cfg.TLS.Mode, CertFile: cfg.TLS.CertFile, KeyFile: cfg.TLS.KeyFile, ExternalURL: cfg.Auth.ExternalURL,
+		ACMEEmail: cfg.TLS.ACMEEmail, ACMEServer: cfg.TLS.ACMEServer, ACMEProfile: cfg.TLS.ACMEProfile,
+		ACMEAcceptTOS: cfg.TLS.ACMEAcceptTOS, ChallengeListen: cfg.TLS.ChallengeListen, CertDir: cfg.TLS.CertDir,
+		RenewCheck: time.Duration(cfg.TLS.RenewCheckSeconds) * time.Second, Logger: logger,
+	})
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("initialize TLS manager: %w", err)
+	}
 
 	v := version.Current()
 	server := mcp.NewServer(&mcp.Implementation{Name: "mcpd", Version: v.Version}, &mcp.ServerOptions{
@@ -77,23 +118,39 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	tools.RegisterFilesystem(server, files, auditStore)
 	tools.RegisterSearch(server, searches, auditStore)
 
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
+	mcpHandler := http.Handler(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger,
 		PropagateRequestCancellation: true,
-	})
+	}))
+	if authServer != nil {
+		server.AddReceivingMiddleware(oauthsrv.EnforceToolScopes(authServer, tools.RequiredScope))
+		mcpHandler = oauthsrv.InjectToolSecuritySchemes(mcpHandler, tools.RequiredScope)
+		mcpHandler = oauthsrv.ProtectMCP(mcpHandler, authServer)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("POST "+cfg.Server.MCPPath, mcpHandler)
+	if authServer != nil {
+		mux.HandleFunc("GET /.well-known/oauth-protected-resource", authServer.ProtectedResourceMetadata)
+		if cfg.Server.MCPPath != "/" {
+			mux.HandleFunc("GET /.well-known/oauth-protected-resource"+cfg.Server.MCPPath, authServer.ProtectedResourceMetadata)
+		}
+		mux.HandleFunc("GET /.well-known/oauth-authorization-server", authServer.AuthorizationServerMetadata)
+		mux.HandleFunc("GET /oauth/jwks.json", authServer.JWKS)
+		mux.HandleFunc("GET /oauth/authorize", authServer.Authorize)
+		mux.HandleFunc("POST /oauth/authorize", authServer.Authorize)
+		mux.HandleFunc("POST /oauth/token", authServer.Token)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "version": v.Version})
 	})
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mcpd", "version": v.Version, "mcp": cfg.Server.MCPPath})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mcpd", "version": v.Version, "mcp": cfg.Server.MCPPath, "oauth": authServer != nil})
 	})
 
-	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, searches: searches, mcp: server}
+	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, searches: searches, oauth: authServer, tls: tlsManager, mcp: server}
 	a.http = &http.Server{
 		Addr: cfg.Server.Listen, Handler: accessLog(logger, mux),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second,
@@ -102,7 +159,22 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 }
 
 func (a *App) Run() error {
-	a.logger.Info("mcpd starting", "listen", a.cfg.Server.Listen, "mcp_path", a.cfg.Server.MCPPath, "version", version.Current().Version)
+	a.logger.Info("mcpd starting", "listen", a.cfg.Server.Listen, "mcp_path", a.cfg.Server.MCPPath, "version", version.Current().Version,
+		"oauth", a.oauth != nil, "tls_mode", a.cfg.TLS.Mode)
+	if a.tls != nil {
+		if err := a.tls.Prepare(context.Background()); err != nil {
+			return fmt.Errorf("prepare TLS: %w", err)
+		}
+		a.http.TLSConfig = a.tls.TLSConfig()
+		renewCtx, cancel := context.WithCancel(context.Background())
+		a.renewCancel = cancel
+		go a.tls.RunRenewal(renewCtx)
+		if err := a.http.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			cancel()
+			return fmt.Errorf("serve HTTPS: %w", err)
+		}
+		return nil
+	}
 	if err := a.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("serve HTTP: %w", err)
 	}
@@ -110,6 +182,9 @@ func (a *App) Run() error {
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
+	if a.renewCancel != nil {
+		a.renewCancel()
+	}
 	var first error
 	if err := a.http.Shutdown(ctx); err != nil {
 		first = err

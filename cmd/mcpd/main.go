@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/kemalnw/mcpd/internal/app"
 	"github.com/kemalnw/mcpd/internal/config"
+	oauthsrv "github.com/kemalnw/mcpd/internal/oauth"
 	"github.com/kemalnw/mcpd/internal/version"
+	"golang.org/x/term"
 )
 
 func main() {
@@ -31,6 +34,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "serve":
 		return serve(args[1:])
+	case "auth":
+		return authCommand(args[1:])
 	case "version", "--version", "-v":
 		data, _ := json.MarshalIndent(version.Current(), "", "  ")
 		fmt.Println(string(data))
@@ -40,6 +45,94 @@ func run(args []string) error {
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func authCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("auth requires a subcommand: set-password")
+	}
+	switch args[0] {
+	case "set-password":
+		return setOwnerPassword(args[1:])
+	default:
+		return fmt.Errorf("unknown auth subcommand %q", args[0])
+	}
+}
+
+func setOwnerPassword(args []string) error {
+	fs := flag.NewFlagSet("auth set-password", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to TOML configuration")
+	passwordStdin := fs.Bool("password-stdin", false, "read the new password from standard input")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	password, err := readOwnerPassword(*passwordStdin)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(password)
+	if err := oauthsrv.SetPassword(cfg.Auth.StateDir, password); err != nil {
+		return err
+	}
+	fmt.Println("Owner password updated.")
+	return nil
+}
+
+func readOwnerPassword(fromStdin bool) ([]byte, error) {
+	if fromStdin {
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 4097))
+		if err != nil {
+			return nil, fmt.Errorf("read password from stdin: %w", err)
+		}
+		if len(data) > 4096 {
+			return nil, errors.New("password input exceeds 4096 bytes")
+		}
+		data = bytesTrimLineEnding(data)
+		return data, nil
+	}
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return nil, errors.New("stdin is not a terminal; use --password-stdin for non-interactive setup")
+	}
+	fmt.Fprint(os.Stderr, "New owner password: ")
+	first, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("read owner password: %w", err)
+	}
+	fmt.Fprint(os.Stderr, "Confirm owner password: ")
+	second, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		zeroBytes(first)
+		return nil, fmt.Errorf("confirm owner password: %w", err)
+	}
+	defer zeroBytes(second)
+	if string(first) != string(second) {
+		zeroBytes(first)
+		return nil, errors.New("password confirmation does not match")
+	}
+	return first, nil
+}
+
+func bytesTrimLineEnding(value []byte) []byte {
+	if len(value) > 0 && value[len(value)-1] == '\n' {
+		value = value[:len(value)-1]
+		if len(value) > 0 && value[len(value)-1] == '\r' {
+			value = value[:len(value)-1]
+		}
+	}
+	return value
+}
+
+func zeroBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
 	}
 }
 
@@ -87,6 +180,7 @@ func printUsage() {
 
 Usage:
   mcpd serve [--config PATH] [--listen ADDR]
+  mcpd auth set-password [--config PATH] [--password-stdin]
   mcpd version
   mcpd help
 

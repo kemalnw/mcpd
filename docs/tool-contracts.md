@@ -56,6 +56,25 @@ Total target: **24 MCP tools**.
 Desktop Commander-specific feedback, prompts, UI telemetry, and `node:local`
 virtual-session behavior are intentionally outside the compatibility target.
 
+
+## Authorization contracts
+
+When OAuth is enabled, every listed tool advertises an OAuth `securitySchemes`
+entry. Scope requirements are intentionally coarse and stable:
+
+- `mcp:read`: read-only process/file/search inspection.
+- `mcp:write`: commands, stdin interaction, termination, filesystem mutation,
+  and other operations capable of changing VM state.
+
+The authoritative check happens after the MCP request body has been parsed.
+`Mcp-Name` is never trusted as the source of authorization policy. Unknown future
+tools default to `mcp:write` until explicitly classified.
+
+An unauthenticated or under-scoped `tools/call` returns an MCP error result with
+`_meta["mcp/www_authenticate"]`, including the required scope and protected
+resource metadata URL. Discovery/listing remains available so an OAuth-capable
+client can understand the server and initiate linking before a tool executes.
+
 ## Process contracts
 
 ### `start_process`

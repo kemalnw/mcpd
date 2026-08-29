@@ -51,3 +51,46 @@ func TestInvalidSearchConfig(t *testing.T) {
 		t.Fatal("Validate() accepted zero search.retention_seconds")
 	}
 }
+
+func TestAuthRequiresCanonicalHTTPSOrigin(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.Enabled = true
+	cfg.Auth.ExternalURL = "http://203.0.113.10"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted HTTP OAuth issuer")
+	}
+	cfg.Auth.ExternalURL = "https://203.0.113.10/"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted trailing slash in OAuth issuer")
+	}
+	cfg.Auth.ExternalURL = "https://203.0.113.10"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected canonical HTTPS issuer: %v", err)
+	}
+}
+
+func TestACMERequiresExplicitTermsAcceptance(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.ExternalURL = "https://203.0.113.10"
+	cfg.TLS.Mode = "acme"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted ACME without explicit terms acceptance")
+	}
+	cfg.TLS.ACMEAcceptTOS = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected complete ACME config: %v", err)
+	}
+}
+
+func TestTLSFilesRequiresCertificatePair(t *testing.T) {
+	cfg := Default()
+	cfg.TLS.Mode = "files"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted tls.mode=files without cert/key")
+	}
+	cfg.TLS.CertFile = "/tmp/cert.pem"
+	cfg.TLS.KeyFile = "/tmp/key.pem"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected TLS file paths: %v", err)
+	}
+}
