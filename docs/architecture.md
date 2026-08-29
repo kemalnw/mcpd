@@ -38,8 +38,8 @@ internal/filesystem
 internal/documents      (planned)
   image, Excel, DOCX, PDF handlers plugged into the file facade
 
-internal/search         (planned)
-  ripgrep + Office document search sessions
+internal/search
+  progressive file/content sessions, ripgrep backend, native fallback
 
 internal/auth           (planned)
   OAuth 2.1 authorization/resource-server responsibilities
@@ -138,6 +138,41 @@ returns an explicit unsupported-format error until their dedicated handlers are
 implemented. This prevents binary containers from being accidentally treated
 as text while keeping the external `read_file`/`write_file`/`edit_block`
 contracts stable.
+
+## Search model
+
+Search uses explicit application-level `sessionId` handles while the MCP
+transport remains stateless. `start_search` creates a background worker and
+waits only briefly for an initial chunk before returning. Later requests read
+retained results by absolute offset or negative tail offset.
+
+```text
+start_search
+     |
+     +--> search_<id>
+            |
+            +--> ripgrep backend (preferred when `rg` is available)
+            |
+            +--> native Go fallback (zero external requirement)
+            |
+            +--> bounded global match count
+            +--> cancellation / timeout
+            +--> retained completed results
+```
+
+The native fallback intentionally exists so `mcpd` does not require ripgrep to
+start. Ripgrep remains preferred because it honors ignore files and is much
+faster on large trees. Both backends share the same result/session contract.
+
+`maxResults` is enforced as a global match cap rather than passing ripgrep's
+`-m` through directly, because ripgrep defines `-m` per file. Likewise,
+`filePattern` is intersected with the primary filename pattern; multiple
+positive ripgrep globs would otherwise form a union. These choices make tool
+semantics stable regardless of backend.
+
+Completed sessions are retained for five minutes after their last read by
+default. Stopping a search cancels work but does not delete already discovered
+results.
 
 ## Structured tool outputs
 

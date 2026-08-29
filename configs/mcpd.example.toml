@@ -17,6 +17,11 @@ nested_entry_limit = 100
 http_timeout_seconds = 15
 max_remote_bytes = 16777216
 
+[search]
+default_max_results = 1000
+retention_seconds = 300
+initial_wait_ms = 40
+
 [audit]
 enabled = true
 # path defaults to $XDG_STATE_HOME/mcpd/audit.jsonl or ~/.local/state/mcpd/audit.jsonl

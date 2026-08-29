@@ -37,10 +37,10 @@ fields such as `origin`.
 
 | Tool | Status |
 | --- | --- |
-| `start_search` | planned |
-| `get_more_search_results` | planned |
-| `stop_search` | planned |
-| `list_searches` | planned |
+| `start_search` | implemented |
+| `get_more_search_results` | implemented |
+| `stop_search` | implemented |
+| `list_searches` | implemented |
 
 ### Configuration and diagnostics
 
@@ -232,21 +232,68 @@ not silently broken.
 Planned structured edit handlers: Excel range replacement and DOCX XML
 replacement.
 
-## Planned search semantics
+## Search contracts
 
-Search remains progressive and uses an explicit application-level `sessionId`.
-That identifier is a search-resource handle and does not introduce an MCP
-transport session.
+Search is progressive and uses an explicit application-level `sessionId`. That
+identifier is a search-resource handle and does not introduce an MCP transport
+session.
 
-Target tools:
+### `start_search`
 
-```text
-start_search -> sessionId
-get_more_search_results(sessionId)
-stop_search(sessionId)
-list_searches()
+```json
+{
+  "path": "string, required",
+  "pattern": "string, required",
+  "searchType": "files | content, optional; default files",
+  "filePattern": "string, optional; pipe-separated globs",
+  "ignoreCase": "boolean, optional; default true",
+  "maxResults": "integer, optional; default configured limit",
+  "includeHidden": "boolean, optional; default false",
+  "contextLines": "integer, optional; default 5",
+  "timeout_ms": "integer, optional",
+  "earlyTermination": "boolean, optional; default true for files",
+  "literalSearch": "boolean, optional; default false"
+}
 ```
 
-Text/file search will use ripgrep semantics. Excel and DOCX content require
-format-aware search adapters rather than treating ZIP/XML containers as plain
-text.
+The call starts work in the background and returns after the first result chunk,
+completion, or the configured initial wait (40 ms by default). Exact filename
+searches inherit Desktop Commander-style 1500 ms default timeout when no timeout
+is supplied.
+
+Ripgrep is selected automatically when available. Otherwise a native Go walker
+provides the same MCP contract. The fallback does not currently interpret
+`.gitignore`/`.ignore` files, while ripgrep does.
+
+Unlike raw ripgrep `-m`, `maxResults` is a **global match cap** across the whole
+search. `filePattern` is an additional filter and therefore intersects the main
+filename pattern.
+
+### `get_more_search_results`
+
+```json
+{
+  "sessionId": "string, required",
+  "offset": "integer, optional; default 0",
+  "length": "integer, optional; default 100"
+}
+```
+
+- non-negative `offset`: absolute result range, no implicit cursor;
+- negative `offset`: return the last `abs(offset)` retained results and ignore
+  `length`;
+- `hasMoreResults` remains true while more retained results exist or the search
+  is still running.
+
+### `stop_search`
+
+Input: `{ "sessionId": string }`. Cancels a running search but preserves its
+already-discovered results until normal retention cleanup.
+
+### `list_searches`
+
+Input: `{}`. Returns running and retained completed sessions with search type,
+pattern, backend, status, runtime, total results, and total matches.
+
+Excel and DOCX content search will later merge format-aware results into this
+same session contract rather than treating ZIP/XML containers as plain text.
