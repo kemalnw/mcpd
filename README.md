@@ -14,9 +14,9 @@ the Unix user running `mcpd`. Run it as an ordinary user for that user's access,
 or run it as `root` when full operating-system access is the intended behavior.
 
 > **Status:** early development. Process/terminal, native text/filesystem, progressive
-> search, OAuth 2.1/CIMD, and HTTPS/TLS are implemented. Structured document
-> handlers, daemon installation/lifecycle commands, and release packaging remain on
-> the roadmap.
+> search, OAuth 2.1/CIMD, HTTPS/TLS, and systemd lifecycle management are
+> implemented. Structured document handlers and release packaging remain on the
+> roadmap.
 
 ## Design goals
 
@@ -187,6 +187,57 @@ explicitly. HTTP-01 must be reachable on the configured challenge listener
 (default `:80`). The HTTPS listener is configured separately, normally `:443`.
 
 
+## Install and service lifecycle
+
+On a systemd-based Linux VM, build or download `mcpd`, then install it once:
+
+```bash
+sudo ./mcpd install
+```
+
+The installer copies the current binary to `/usr/local/bin/mcpd`, writes a
+validated system config to `/etc/mcpd/config.toml` when one does not already
+exist, stores durable state beneath `/var/lib/mcpd`, and installs systemd units.
+Existing config is preserved by default. Use `--force-config` only when replacing
+it intentionally.
+
+When invoked through `sudo`, the daemon user defaults to `SUDO_USER`, so a normal
+install does not silently turn AI access into root access. Full-OS mode remains
+explicit:
+
+```bash
+sudo mcpd install --user root
+```
+
+Lifecycle commands use systemd and journald directly:
+
+```bash
+sudo mcpd start
+sudo mcpd restart
+mcpd status
+mcpd logs --lines 100
+mcpd logs --follow
+mcpd doctor
+sudo mcpd stop
+```
+
+If an unprivileged service user needs port 80 or 443, the installer creates
+`mcpd.socket`. systemd owns the privileged listener and passes it to `mcpd` using
+socket activation. The service is deliberately not granted `CAP_NET_BIND_SERVICE`,
+so commands spawned by MCP do not inherit extra networking privilege.
+
+If OAuth is enabled but no owner password exists yet, installation succeeds but
+service start is deferred. Configure the credential first, then start the daemon:
+
+```bash
+sudo mcpd auth set-password --config /etc/mcpd/config.toml
+sudo mcpd start
+```
+
+`mcpd doctor` validates systemd availability, installed binary/config/unit files,
+service user, systemd unit syntax, state permissions, socket-activation needs,
+OAuth password state, TLS file prerequisites, and current service activity.
+
 ## Configuration
 
 `mcpd` reads TOML from `$MCPD_CONFIG` when set, otherwise from the platform user
@@ -201,7 +252,7 @@ See [`configs/mcpd.example.toml`](configs/mcpd.example.toml).
 3. ✅ Progressive search with explicit search handles, ripgrep acceleration, and native fallback.
 4. ⏸️ Image, Excel, DOCX, and PDF handlers — deferred until after the MVP.
 5. ✅ OAuth 2.1/CIMD, scoped tool authorization, and TLS/ACME for public-IP endpoints.
-6. ⏳ `mcpd install/start/stop/restart/status/logs/doctor` with systemd.
+6. ✅ `mcpd install/start/stop/restart/status/logs/doctor` with systemd and privileged-port socket activation.
 7. ⏳ Release automation, signed artifacts, checksums, and install script.
 
 See [`docs/architecture.md`](docs/architecture.md) for the package boundaries

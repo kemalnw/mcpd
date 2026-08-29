@@ -8,14 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/kemalnw/mcpd/internal/activation"
 	"github.com/kemalnw/mcpd/internal/app"
 	"github.com/kemalnw/mcpd/internal/config"
 	oauthsrv "github.com/kemalnw/mcpd/internal/oauth"
+	"github.com/kemalnw/mcpd/internal/service"
 	"github.com/kemalnw/mcpd/internal/version"
 	"golang.org/x/term"
 )
@@ -34,6 +37,20 @@ func run(args []string) error {
 	switch args[0] {
 	case "serve":
 		return serve(args[1:])
+	case "install":
+		return installCommand(args[1:])
+	case "start":
+		return startCommand(args[1:])
+	case "stop":
+		return stopCommand(args[1:])
+	case "restart":
+		return restartCommand(args[1:])
+	case "status":
+		return statusCommand(args[1:])
+	case "logs":
+		return logsCommand(args[1:])
+	case "doctor":
+		return doctorCommand(args[1:])
 	case "auth":
 		return authCommand(args[1:])
 	case "version", "--version", "-v":
@@ -67,7 +84,7 @@ func setOwnerPassword(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, err := loadCommandConfig(*configPath)
 	if err != nil {
 		return err
 	}
@@ -78,6 +95,14 @@ func setOwnerPassword(args []string) error {
 	defer zeroBytes(password)
 	if err := oauthsrv.SetPassword(cfg.Auth.StateDir, password); err != nil {
 		return err
+	}
+	if *configPath == service.ConfigPath && os.Geteuid() == 0 {
+		if err := service.ChownToInstalledAccount(cfg.Auth.StateDir); err != nil {
+			return err
+		}
+		if err := service.ChownToInstalledAccount(oauthsrv.PasswordPath(cfg.Auth.StateDir)); err != nil {
+			return err
+		}
 	}
 	fmt.Println("Owner password updated.")
 	return nil
@@ -136,6 +161,13 @@ func zeroBytes(value []byte) {
 	}
 }
 
+func loadCommandConfig(path string) (config.Config, error) {
+	if path == service.ConfigPath {
+		return service.LoadSystemConfig(path)
+	}
+	return config.Load(path)
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to TOML configuration")
@@ -144,21 +176,49 @@ func serve(args []string) error {
 		return err
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := loadCommandConfig(*configPath)
 	if err != nil {
 		return err
 	}
 	if *listen != "" {
 		cfg.Server.Listen = *listen
 	}
+	activated, err := activation.FromEnvironment()
+	if err != nil {
+		return fmt.Errorf("read systemd socket activation: %w", err)
+	}
+	defer activated.Close()
+
+	var mainListener net.Listener
+	if listener, ok, listenErr := activated.ListenerFor(cfg.Server.Listen); listenErr != nil {
+		return listenErr
+	} else if ok {
+		mainListener = listener
+	}
+	appOpts := app.Options{}
+	if cfg.TLS.Mode == "acme" {
+		if probe, ok, probeErr := activated.ListenerFor(cfg.TLS.ChallengeListen); probeErr != nil {
+			return probeErr
+		} else if ok {
+			_ = probe.Close()
+			appOpts.ChallengeListenerFactory = activated.ListenerFactory(cfg.TLS.ChallengeListen)
+		}
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	application, err := app.New(cfg, logger)
+	application, err := app.NewWithOptions(cfg, logger, appOpts)
 	if err != nil {
 		return err
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- application.Run() }()
+	go func() {
+		if mainListener != nil {
+			errCh <- application.RunWithListener(mainListener)
+			return
+		}
+		errCh <- application.Run()
+	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -180,6 +240,10 @@ func printUsage() {
 
 Usage:
   mcpd serve [--config PATH] [--listen ADDR]
+  mcpd install [--user USER] [--config PATH] [--no-enable] [--no-start]
+  mcpd start | stop | restart | status
+  mcpd logs [--follow] [--lines N] [--since TIME]
+  mcpd doctor [--config PATH] [--json]
   mcpd auth set-password [--config PATH] [--password-stdin]
   mcpd version
   mcpd help

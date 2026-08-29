@@ -23,31 +23,34 @@ import (
 	"github.com/go-acme/lego/v5/acme"
 	"github.com/go-acme/lego/v5/certcrypto"
 	"github.com/go-acme/lego/v5/certificate"
+	"github.com/go-acme/lego/v5/challenge"
 	"github.com/go-acme/lego/v5/challenge/http01"
 	"github.com/go-acme/lego/v5/lego"
 	"github.com/go-acme/lego/v5/registration"
 )
 
 type Options struct {
-	Mode            string
-	CertFile        string
-	KeyFile         string
-	ExternalURL     string
-	ACMEEmail       string
-	ACMEServer      string
-	ACMEProfile     string
-	ACMEAcceptTOS   bool
-	ChallengeListen string
-	CertDir         string
-	RenewCheck      time.Duration
-	Logger          *slog.Logger
+	Mode                     string
+	CertFile                 string
+	KeyFile                  string
+	ExternalURL              string
+	ACMEEmail                string
+	ACMEServer               string
+	ACMEProfile              string
+	ACMEAcceptTOS            bool
+	ChallengeListen          string
+	ChallengeListenerFactory func() (net.Listener, error)
+	CertDir                  string
+	RenewCheck               time.Duration
+	Logger                   *slog.Logger
 }
 
 type Manager struct {
-	opts    Options
-	logger  *slog.Logger
-	current atomic.Pointer[tls.Certificate]
-	mu      sync.Mutex
+	opts          Options
+	logger        *slog.Logger
+	current       atomic.Pointer[tls.Certificate]
+	mu            sync.Mutex
+	activatedHTTP *activatedHTTP01Provider
 }
 
 func New(opts Options) (*Manager, error) {
@@ -61,6 +64,9 @@ func New(opts Options) (*Manager, error) {
 		opts.RenewCheck = time.Hour
 	}
 	m := &Manager{opts: opts, logger: opts.Logger}
+	if opts.ChallengeListenerFactory != nil {
+		m.activatedHTTP = newActivatedHTTP01Provider(opts.ChallengeListenerFactory)
+	}
 	return m, nil
 }
 
@@ -72,6 +78,11 @@ func (m *Manager) Prepare(ctx context.Context) error {
 	case "files":
 		return m.loadPair(m.opts.CertFile, m.opts.KeyFile)
 	case "acme":
+		if m.activatedHTTP != nil {
+			if err := m.activatedHTTP.ensureServer(); err != nil {
+				return fmt.Errorf("start activated ACME HTTP server: %w", err)
+			}
+		}
 		if err := os.MkdirAll(m.opts.CertDir, 0o700); err != nil {
 			return fmt.Errorf("create TLS state directory: %w", err)
 		}
@@ -129,6 +140,13 @@ func (m *Manager) RunRenewal(ctx context.Context) {
 	}
 }
 
+func (m *Manager) Close(ctx context.Context) error {
+	if m == nil || m.activatedHTTP == nil {
+		return nil
+	}
+	return m.activatedHTTP.Close(ctx)
+}
+
 func (m *Manager) loadPair(certPath, keyPath string) error {
 	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
@@ -179,11 +197,17 @@ func (m *Manager) obtain(ctx context.Context, certPath, keyPath string, renewal 
 	if err != nil {
 		return err
 	}
-	h, p, err := net.SplitHostPort(m.opts.ChallengeListen)
-	if err != nil {
-		return fmt.Errorf("parse ACME challenge listen address: %w", err)
+	var provider challenge.Provider
+	if m.activatedHTTP != nil {
+		provider = m.activatedHTTP
+	} else {
+		h, p, err := net.SplitHostPort(m.opts.ChallengeListen)
+		if err != nil {
+			return fmt.Errorf("parse ACME challenge listen address: %w", err)
+		}
+		provider = http01.NewProviderServer(h, p)
 	}
-	if err := client.Challenge.SetHTTP01Provider(http01.NewProviderServer(h, p)); err != nil {
+	if err := client.Challenge.SetHTTP01Provider(provider); err != nil {
 		return fmt.Errorf("configure ACME HTTP-01 challenge: %w", err)
 	}
 

@@ -20,6 +20,13 @@ trusted certificate pair (`tls.mode = "files"`) or ACME (`tls.mode = "acme"`).
 ACME private keys, OAuth signing material, and the owner password verifier are
 stored beneath the configured state directories with restrictive permissions.
 
+When installed as a non-root systemd service, privileged ports are handled by
+systemd socket activation instead of granting `CAP_NET_BIND_SERVICE` to `mcpd`.
+This preserves the rule that MCP-spawned child processes receive only daemon-user
+permissions and do not inherit an extra network-binding capability. The installer
+defaults to the invoking `SUDO_USER`; root service mode remains explicit via
+`--user root`.
+
 OAuth client metadata is attacker-controlled input. `mcpd` therefore fetches
 CIMD only over HTTPS, blocks private/loopback/link-local resolved addresses,
 disables redirects, caps metadata size, and validates exact `client_id` and
