@@ -124,9 +124,12 @@ func boolPtr(v bool) *bool { return &v }
 func audited[In, Out any](store *audit.Store, name string, fn func(context.Context, In) (Out, error)) mcp.ToolHandlerFor[In, Out] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
 		started := time.Now()
+		eventID := newEventID()
+		logToolCall(ctx, eventID, name, in)
 		out, err := fn(ctx, in)
+		durationMS := time.Since(started).Milliseconds()
 		if store != nil {
-			event := audit.Event{ID: newEventID(), Timestamp: started.UTC(), Tool: name, Arguments: in, DurationMS: time.Since(started).Milliseconds()}
+			event := audit.Event{ID: eventID, Timestamp: started.UTC(), Tool: name, Arguments: in, DurationMS: durationMS}
 			if err != nil {
 				event.Error = err.Error()
 			}
@@ -134,6 +137,7 @@ func audited[In, Out any](store *audit.Store, name string, fn func(context.Conte
 				err = fmt.Errorf("record audit event: %w", auditErr)
 			}
 		}
+		logToolResult(ctx, eventID, name, out, durationMS, err)
 		return nil, out, err
 	}
 }

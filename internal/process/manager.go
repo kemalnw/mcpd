@@ -68,6 +68,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 		return StartResult{}, err
 	}
 	m.addSession(s)
+	logProcessStarted(s.snapshot())
 
 	started := time.Now()
 	m.waitForStart(ctx, s, time.Duration(waitMS)*time.Millisecond)
@@ -137,6 +138,7 @@ func (m *Manager) wait(s *session) {
 		s.captureWG.Wait()
 	}
 	s.markExited(err)
+	logProcessExited(s.snapshot(), err)
 	m.markCompleted(s.pid)
 }
 
