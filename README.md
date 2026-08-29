@@ -250,6 +250,13 @@ the system, writes `/etc/mcpd/config.toml`, installs/enables the single
 Owner passwords have a minimum of 8 characters; a longer passphrase is recommended.
 The password is read without echo and is never passed in process arguments.
 
+OAuth access tokens remain short-lived (1 hour by default). Clients that request
+`offline_access` receive rotating refresh tokens with a 30-day sliding idle timeout,
+so active ChatGPT connections can renew authorization without repeated owner login.
+After upgrading an existing ChatGPT app to a release with refresh-token support,
+disconnect/reconnect it once so ChatGPT fetches the new OAuth metadata and obtains
+its first refresh token.
+
 Rerunning `sudo mcpd setup` preserves an existing configuration by default and
 offers an explicit reconfigure choice. Compatible OAuth signing/password state is
 preserved unless the user explicitly replaces it.

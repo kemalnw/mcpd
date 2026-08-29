@@ -155,6 +155,12 @@ func TestEditExactCountAndFuzzySuggestion(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello brave world\nhello brave world\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	// os.WriteFile applies the process umask when creating a file. Set the mode
+	// explicitly so this test verifies that Edit preserves an existing 0640 mode
+	// even when the test process runs under a restrictive umask such as 0077.
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	mismatch, err := m.Edit(context.Background(), EditRequest{Path: path, OldString: "hello brave world", NewString: "changed", ExpectedReplacements: 1})
 	if err != nil {
 		t.Fatal(err)

@@ -32,6 +32,8 @@ The durable audit event and operational tool logs share the same `event_id`, so 
 
 The audit trail is intended for durable/security-oriented history, while journald is intended for live operations and debugging. Do not remove or replace the audit trail with service logs.
 
+OAuth refresh events are also summarized in the operational journal (`oauth refresh success` / `oauth refresh rejected`) with client and refresh-family identifiers. Raw access tokens and refresh tokens are never logged.
+
 ## Sensitive data
 
 Treat both logging surfaces as sensitive operational data. In particular, `start_process.command` is logged intentionally so an operator can see what the AI executed. Shell commands can themselves contain user-provided secrets, tokens, or credentials; avoid embedding secrets directly in command strings when possible and protect access to journald and the audit file accordingly.

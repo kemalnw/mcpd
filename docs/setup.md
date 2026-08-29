@@ -97,6 +97,14 @@ Choose OAuth authentication. `mcpd` publishes OAuth protected-resource and
 authorization-server metadata from the configured canonical public origin, even
 though the reverse proxy talks to the daemon over local HTTP.
 
+For persistent authorization, `mcpd` advertises `offline_access` and rotating
+refresh-token support. Access tokens still expire after 1 hour by default, but a
+client holding a valid refresh token can renew them without asking for the owner
+password again. The refresh authorization uses a 30-day sliding idle timeout by
+default. Existing ChatGPT apps created before refresh-token support should be
+disconnected/reconnected once after upgrade so ChatGPT fetches the updated OAuth
+metadata and obtains its first refresh token.
+
 If setup reports local success but ChatGPT cannot connect, verify the external
 HTTPS frontend first, then run:
 
