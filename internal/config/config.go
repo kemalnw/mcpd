@@ -27,6 +27,7 @@ type Config struct {
 	Server  ServerConfig  `toml:"server"`
 	Process ProcessConfig `toml:"process"`
 	Files   FilesConfig   `toml:"files"`
+	Search  SearchConfig  `toml:"search"`
 	Audit   AuditConfig   `toml:"audit"`
 }
 
@@ -52,6 +53,12 @@ type FilesConfig struct {
 	MaxRemoteBytes     int64 `toml:"max_remote_bytes"`
 }
 
+type SearchConfig struct {
+	DefaultMaxResults int `toml:"default_max_results"`
+	RetentionSeconds  int `toml:"retention_seconds"`
+	InitialWaitMS     int `toml:"initial_wait_ms"`
+}
+
 type AuditConfig struct {
 	Enabled bool   `toml:"enabled"`
 	Path    string `toml:"path"`
@@ -62,6 +69,7 @@ func Default() Config {
 		Server:  ServerConfig{Listen: defaultListen, MCPPath: defaultMCPPath, ShutdownSeconds: 10},
 		Process: ProcessConfig{DefaultShell: defaultShell, DefaultWaitMS: defaultWaitTimeoutMS, OutputBufferBytes: defaultOutputBufferBytes, MaxLineBytes: defaultMaxLineBytes, CompletedSessions: defaultCompletedSessions},
 		Files:   FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
+		Search:  SearchConfig{DefaultMaxResults: 1000, RetentionSeconds: 300, InitialWaitMS: 40},
 		Audit:   AuditConfig{Enabled: true, Path: defaultAuditPath()},
 	}
 }
@@ -102,6 +110,9 @@ func (c Config) Validate() error {
 	}
 	if c.Files.DefaultReadLines <= 0 || c.Files.MaxLineBytes <= 0 || c.Files.NestedEntryLimit <= 0 || c.Files.HTTPTimeoutSeconds <= 0 || c.Files.MaxRemoteBytes <= 0 {
 		return errors.New("files limits contain invalid values")
+	}
+	if c.Search.DefaultMaxResults <= 0 || c.Search.RetentionSeconds <= 0 || c.Search.InitialWaitMS <= 0 {
+		return errors.New("search limits contain invalid values")
 	}
 	return nil
 }

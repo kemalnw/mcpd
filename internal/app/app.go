@@ -13,6 +13,7 @@ import (
 	"github.com/kemalnw/mcpd/internal/config"
 	fsmgr "github.com/kemalnw/mcpd/internal/filesystem"
 	processmgr "github.com/kemalnw/mcpd/internal/process"
+	searchmgr "github.com/kemalnw/mcpd/internal/search"
 	"github.com/kemalnw/mcpd/internal/tools"
 	"github.com/kemalnw/mcpd/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,6 +25,7 @@ type App struct {
 	audit     *audit.Store
 	processes *processmgr.Manager
 	files     *fsmgr.Manager
+	searches  *searchmgr.Manager
 	mcp       *mcp.Server
 	http      *http.Server
 }
@@ -55,6 +57,15 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		_ = auditStore.Close()
 		return nil, err
 	}
+	searches, err := searchmgr.NewManager(searchmgr.ManagerOptions{
+		DefaultMaxResults: cfg.Search.DefaultMaxResults, Retention: time.Duration(cfg.Search.RetentionSeconds) * time.Second,
+		InitialWait: time.Duration(cfg.Search.InitialWaitMS) * time.Millisecond,
+	})
+	if err != nil {
+		_ = processes.Close()
+		_ = auditStore.Close()
+		return nil, err
+	}
 
 	v := version.Current()
 	server := mcp.NewServer(&mcp.Implementation{Name: "mcpd", Version: v.Version}, &mcp.ServerOptions{
@@ -64,6 +75,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	})
 	tools.RegisterProcess(server, processes, auditStore)
 	tools.RegisterFilesystem(server, files, auditStore)
+	tools.RegisterSearch(server, searches, auditStore)
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger,
@@ -81,7 +93,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mcpd", "version": v.Version, "mcp": cfg.Server.MCPPath})
 	})
 
-	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, mcp: server}
+	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, searches: searches, mcp: server}
 	a.http = &http.Server{
 		Addr: cfg.Server.Listen, Handler: accessLog(logger, mux),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second,
@@ -100,6 +112,9 @@ func (a *App) Run() error {
 func (a *App) Shutdown(ctx context.Context) error {
 	var first error
 	if err := a.http.Shutdown(ctx); err != nil {
+		first = err
+	}
+	if err := a.searches.Close(); err != nil && first == nil {
 		first = err
 	}
 	if err := a.processes.Close(); err != nil && first == nil {

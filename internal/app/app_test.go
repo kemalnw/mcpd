@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kemalnw/mcpd/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -23,6 +24,7 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer application.searches.Close()
 	defer application.processes.Close()
 	defer application.audit.Close()
 
@@ -50,6 +52,7 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 		"force_terminate": false, "list_sessions": false, "list_processes": false, "kill_process": false,
 		"read_file": false, "read_multiple_files": false, "write_file": false, "create_directory": false,
 		"list_directory": false, "move_file": false, "get_file_info": false, "edit_block": false,
+		"start_search": false, "get_more_search_results": false, "stop_search": false, "list_searches": false,
 	}
 	for _, tool := range listed.Tools {
 		if _, ok := required[tool.Name]; ok {
@@ -125,6 +128,44 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	infoStructured := requireStructuredMap(t, infoResult)
 	if infoStructured["file_type"] != "text" || infoStructured["line_count"] != float64(2) {
 		t.Fatalf("unexpected file info: %#v", infoStructured)
+	}
+
+	searchResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "start_search", Arguments: map[string]any{
+			"path": filepath.Dir(path), "pattern": "BETA", "searchType": "content", "filePattern": "*.txt",
+			"literalSearch": true, "contextLines": 0,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolOK(t, searchResult)
+	searchStructured := requireStructuredMap(t, searchResult)
+	searchID, _ := searchStructured["sessionId"].(string)
+	if searchID == "" {
+		t.Fatalf("start_search returned no sessionId: %#v", searchStructured)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		more, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "get_more_search_results", Arguments: map[string]any{"sessionId": searchID, "offset": 0, "length": 100},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertToolOK(t, more)
+		structured := requireStructuredMap(t, more)
+		if structured["isComplete"] == true {
+			if structured["totalMatches"] != float64(1) {
+				t.Fatalf("unexpected search result: %#v", structured)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("search did not complete: %#v", structured)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
