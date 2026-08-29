@@ -14,7 +14,7 @@ the Unix user running `mcpd`. Run it as an ordinary user for that user's access,
 or run it as `root` when full operating-system access is the intended behavior.
 
 > **Status:** early development. Process/terminal, native text/filesystem, progressive
-> search, OAuth 2.1/CIMD, HTTPS/TLS, systemd lifecycle management, and signed
+> search, OAuth 2.1/CIMD, HTTP-origin deployment, systemd lifecycle management, and signed
 > release automation are implemented. Structured document handlers remain
 > deferred until after the MVP.
 
@@ -38,9 +38,14 @@ MCP client
     |
     | HTTPS + OAuth 2.1 / MCP 2026-07-28
     v
++-----------------------------+
+| user-managed HTTPS frontend |
++--------------+--------------+
+               | HTTP
+               v
 +---------------------------+
 |           mcpd            |
-| TLS + OAuth + MCP server  |
+| OAuth + MCP HTTP origin   |
 +-------------+-------------+
               |
      +--------+-----------+-----------+--------+
@@ -120,23 +125,23 @@ git clone https://github.com/kemalnw/mcpd.git
 cd mcpd
 make check
 make build
-./bin/mcpd serve --listen 127.0.0.1:8787
+./bin/mcpd serve --listen 127.0.0.1:31354
 ```
 
 Health check:
 
 ```bash
-curl http://127.0.0.1:8787/healthz
+curl http://127.0.0.1:31354/healthz
 ```
 
 Default MCP endpoint:
 
 ```text
-http://127.0.0.1:8787/mcp
+http://127.0.0.1:31354/mcp
 ```
 
-For local development, `auth.enabled = false` and `tls.mode = "off"` keep the
-endpoint on plain HTTP. Public deployments should enable OAuth and HTTPS together.
+For local development, `auth.enabled = false` keeps the origin on plain HTTP.
+For remote production use, keep `mcpd` behind a user-managed HTTPS terminator and enable OAuth.
 
 ## Install from a release
 
@@ -148,11 +153,19 @@ curl -fsSL https://github.com/kemalnw/mcpd/releases/latest/download/install.sh |
 
 The installer verifies SHA-256 before extraction. If `cosign` is installed it also
 verifies the Sigstore identity of the release checksum manifest; set
-`MCPD_REQUIRE_SIGNATURE=1` to require that verification. Then install the systemd
-service with `sudo mcpd install`. See [`docs/releases.md`](docs/releases.md) for
-artifact names, manual verification, provenance, and the maintainer release flow.
+`MCPD_REQUIRE_SIGNATURE=1` to require that verification.
 
-## OAuth and HTTPS
+When an interactive terminal is available, the installer automatically launches
+`sudo mcpd setup`. The wizard asks for the public domain, service user, OAuth owner
+password, and whether external HTTPS is already configured. The normal backend and
+MCP path default to `127.0.0.1:31354` and `/mcp`.
+
+If no terminal is available, the installer never waits for prompts: it installs the
+binary and prints `sudo mcpd setup` as the next step. Set `MCPD_SETUP=0` to suppress
+automatic setup explicitly. See [`docs/releases.md`](docs/releases.md) for artifact
+verification, provenance, and the maintainer release flow.
+
+## OAuth and public HTTPS
 
 `mcpd` contains both the OAuth authorization server and MCP resource server. It
 implements Authorization Code + PKCE S256 and prefers Client ID Metadata
@@ -166,12 +179,15 @@ mcpd auth set-password
 printf '%s\n' "$MCPD_OWNER_PASSWORD" | mcpd auth set-password --password-stdin
 ```
 
-A public-IP deployment uses a canonical origin and an MCP resource beneath it:
+A remote deployment uses a canonical domain origin and an MCP resource beneath it:
 
 ```text
-OAuth issuer: https://203.0.113.10
-MCP resource: https://203.0.113.10/mcp
+OAuth issuer: https://mcp.example.com
+MCP resource: https://mcp.example.com/mcp
 ```
+
+`mcpd` itself serves plain HTTP only. `auth.external_url` describes the public HTTPS
+origin seen by MCP clients; it is intentionally independent from the local HTTP listener.
 
 Relevant discovery endpoints are:
 
@@ -189,41 +205,71 @@ Tools advertise `securitySchemes`, and an unauthenticated `tools/call` returns
 linking. Read-only tools require `mcp:read`; mutating/process-control tools
 require `mcp:write`.
 
-TLS modes:
+### HTTPS termination and DNS
 
-- `off`: local development only.
-- `files`: load an existing certificate/key pair and hot-serve it through Go TLS.
-- `acme`: obtain and renew certificates with ACME HTTP-01. The default
-  `shortlived` profile supports Let's Encrypt public IPv4/IPv6 certificates.
+`mcpd` does not issue, load, renew, or terminate TLS certificates. The default
+listener is `127.0.0.1:31354`; the deployment owner supplies HTTPS on port 443 and
+forwards requests to that HTTP backend. For example:
 
-ACME mode never accepts CA terms implicitly: set `acme_accept_tos = true`
-explicitly. HTTP-01 must be reachable on the configured challenge listener
-(default `:80`). The HTTPS listener is configured separately, normally `:443`.
-
-
-## Install and service lifecycle
-
-On a systemd-based Linux VM, build or download `mcpd`, then install it once:
-
-```bash
-sudo ./mcpd install
+```text
+ChatGPT
+  -> HTTPS mcp.example.com:443
+  -> Caddy/nginx/HAProxy/other user-managed TLS frontend
+  -> HTTP 127.0.0.1:31354
+  -> mcpd
 ```
 
-The installer copies the current binary to `/usr/local/bin/mcpd`, writes a
-validated system config to `/etc/mcpd/config.toml` when one does not already
-exist, stores durable state beneath `/var/lib/mcpd`, and installs systemd units.
-Existing config is preserved by default. Use `--force-config` only when replacing
-it intentionally.
+Cloudflare DNS can still host the domain. With **DNS only**, the A/AAAA record
+points clients directly at the VM, so the VM must have a user-managed HTTPS
+frontend listening on `:443`. DNS does not translate ports and does not provide
+TLS by itself. The frontend can forward to `127.0.0.1:31354`.
 
-When invoked through `sudo`, the daemon user defaults to `SUDO_USER`, so a normal
-install does not silently turn AI access into root access. Full-OS mode remains
-explicit:
+With **Cloudflare Proxied**, Cloudflare participates in the HTTP/TLS path; origin
+TLS/proxy policy is deployment-specific and remains outside `mcpd`.
+
+Port 80 is not required by `mcpd`. The backend port `31354` is configurable, but
+it is the project default and should normally remain unprivileged.
+
+
+## Setup and service lifecycle
+
+The primary first-run command is:
 
 ```bash
-sudo mcpd install --user root
+sudo mcpd setup
 ```
 
-Lifecycle commands use systemd and journald directly:
+See [`docs/setup.md`](docs/setup.md) for interactive setup, automation, reruns,
+Cloudflare/DNS examples, and the ChatGPT connection flow.
+
+`mcpd setup` is the human-facing wizard. It validates all answers before changing
+the system, writes `/etc/mcpd/config.toml`, installs/enables the single
+`mcpd.service`, configures the OAuth owner credential, starts the service, runs
+`mcpd doctor`, and checks the local `/healthz` endpoint.
+
+Owner passwords have a minimum of 8 characters; a longer passphrase is recommended.
+The password is read without echo and is never passed in process arguments.
+
+Rerunning `sudo mcpd setup` preserves an existing configuration by default and
+offers an explicit reconfigure choice. Compatible OAuth signing/password state is
+preserved unless the user explicitly replaces it.
+
+For automation, use explicit setup flags and password stdin:
+
+```bash
+printf '%s\n' "$MCPD_OWNER_PASSWORD" | sudo mcpd setup \
+  --domain mcp.example.com --https-ready --yes --password-stdin
+```
+
+
+`mcpd install` remains the deterministic lower-level primitive for scripts/tests
+that already provide a config. It is intentionally non-interactive:
+
+```bash
+sudo mcpd install --config /path/to/config.toml
+```
+
+Lifecycle commands are thin systemd/journald wrappers:
 
 ```bash
 sudo mcpd start
@@ -235,22 +281,7 @@ mcpd doctor
 sudo mcpd stop
 ```
 
-If an unprivileged service user needs port 80 or 443, the installer creates
-`mcpd.socket`. systemd owns the privileged listener and passes it to `mcpd` using
-socket activation. The service is deliberately not granted `CAP_NET_BIND_SERVICE`,
-so commands spawned by MCP do not inherit extra networking privilege.
-
-If OAuth is enabled but no owner password exists yet, installation succeeds but
-service start is deferred. Configure the credential first, then start the daemon:
-
-```bash
-sudo mcpd auth set-password --config /etc/mcpd/config.toml
-sudo mcpd start
-```
-
-`mcpd doctor` validates systemd availability, installed binary/config/unit files,
-service user, systemd unit syntax, state permissions, socket-activation needs,
-OAuth password state, TLS file prerequisites, and current service activity.
+For v0.1.x upgrades, see [`docs/migration-v0.2.md`](docs/migration-v0.2.md).
 
 ## Configuration
 
@@ -265,8 +296,8 @@ See [`configs/mcpd.example.toml`](configs/mcpd.example.toml).
 2. ✅ Native text/filesystem facade, URL reads, metadata, directory operations, and text `edit_block`.
 3. ✅ Progressive search with explicit search handles, ripgrep acceleration, and native fallback.
 4. ⏸️ Image, Excel, DOCX, and PDF handlers — deferred until after the MVP.
-5. ✅ OAuth 2.1/CIMD, scoped tool authorization, and TLS/ACME for public-IP endpoints.
-6. ✅ `mcpd install/start/stop/restart/status/logs/doctor` with systemd and privileged-port socket activation.
+5. ✅ OAuth 2.1/CIMD and scoped tool authorization for domain-based public endpoints.
+6. ✅ `mcpd install/start/stop/restart/status/logs/doctor` with a minimal single systemd service.
 7. ✅ Reproducible release automation, Sigstore-signed artifacts, provenance, checksums, and install script.
 
 See [`docs/architecture.md`](docs/architecture.md) for the package boundaries

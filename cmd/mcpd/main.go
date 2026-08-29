@@ -8,13 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/kemalnw/mcpd/internal/activation"
 	"github.com/kemalnw/mcpd/internal/app"
 	"github.com/kemalnw/mcpd/internal/config"
 	oauthsrv "github.com/kemalnw/mcpd/internal/oauth"
@@ -39,6 +37,8 @@ func run(args []string) error {
 		return serve(args[1:])
 	case "install":
 		return installCommand(args[1:])
+	case "setup":
+		return setupCommand(args[1:])
 	case "start":
 		return startCommand(args[1:])
 	case "stop":
@@ -183,42 +183,15 @@ func serve(args []string) error {
 	if *listen != "" {
 		cfg.Server.Listen = *listen
 	}
-	activated, err := activation.FromEnvironment()
-	if err != nil {
-		return fmt.Errorf("read systemd socket activation: %w", err)
-	}
-	defer activated.Close()
-
-	var mainListener net.Listener
-	if listener, ok, listenErr := activated.ListenerFor(cfg.Server.Listen); listenErr != nil {
-		return listenErr
-	} else if ok {
-		mainListener = listener
-	}
-	appOpts := app.Options{}
-	if cfg.TLS.Mode == "acme" {
-		if probe, ok, probeErr := activated.ListenerFor(cfg.TLS.ChallengeListen); probeErr != nil {
-			return probeErr
-		} else if ok {
-			_ = probe.Close()
-			appOpts.ChallengeListenerFactory = activated.ListenerFactory(cfg.TLS.ChallengeListen)
-		}
-	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	application, err := app.NewWithOptions(cfg, logger, appOpts)
+	application, err := app.New(cfg, logger)
 	if err != nil {
 		return err
 	}
 
 	errCh := make(chan error, 1)
-	go func() {
-		if mainListener != nil {
-			errCh <- application.RunWithListener(mainListener)
-			return
-		}
-		errCh <- application.Run()
-	}()
+	go func() { errCh <- application.Run() }()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -240,6 +213,7 @@ func printUsage() {
 
 Usage:
   mcpd serve [--config PATH] [--listen ADDR]
+  mcpd setup [--domain HOST] [--yes] [--reconfigure]
   mcpd install [--user USER] [--config PATH] [--no-enable] [--no-start]
   mcpd start | stop | restart | status
   mcpd logs [--follow] [--lines N] [--since TIME]

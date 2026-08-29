@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -59,5 +60,26 @@ func TestInstallCommandStaged(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "etc/systemd/system/mcpd.socket")); !os.IsNotExist(err) {
 		t.Fatalf("safe default install should not create mcpd.socket, err=%v", err)
+	}
+}
+
+func TestSetupRejectsNonInteractivePrompting(t *testing.T) {
+	oldEUID, oldTTY := setupEUID, setupIsTerminal
+	setupEUID = func() int { return 0 }
+	setupIsTerminal = func() bool { return false }
+	t.Cleanup(func() { setupEUID, setupIsTerminal = oldEUID, oldTTY })
+	err := setupCommand(nil)
+	if err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("setupCommand error = %v", err)
+	}
+}
+
+func TestSetupFlagsKeepAutomationExplicit(t *testing.T) {
+	opts, err := parseSetupFlags([]string{"--domain", "mcp.example.com", "--yes", "--password-stdin", "--reconfigure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Domain != "mcp.example.com" || !opts.Yes || !opts.PasswordStdin || !opts.Reconfigure {
+		t.Fatalf("unexpected setup options: %#v", opts)
 	}
 }

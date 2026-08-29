@@ -1,5 +1,7 @@
 [server]
-listen = "0.0.0.0:8787"
+# mcpd is an HTTP origin server. Keep it on an unprivileged backend port and
+# put your own HTTPS terminator/reverse proxy in front for remote production use.
+listen = "127.0.0.1:31354"
 mcp_path = "/mcp"
 shutdown_seconds = 10
 
@@ -26,30 +28,15 @@ initial_wait_ms = 40
 enabled = true
 # path defaults to $XDG_STATE_HOME/mcpd/audit.jsonl or ~/.local/state/mcpd/audit.jsonl
 
-# Local development defaults. For a public endpoint enable OAuth and TLS together.
+# For a remote production endpoint, enable OAuth and set the canonical public
+# HTTPS origin exposed by the user's reverse proxy/TLS terminator.
 [auth]
 enabled = false
-# Canonical HTTPS origin, without /mcp and without a trailing slash.
-# A raw public IP is valid, for example: "https://203.0.113.10"
+# Example: "https://mcp.example.com" (without /mcp and without trailing slash).
+# This remains HTTPS even though mcpd itself listens on plain HTTP locally.
 external_url = ""
 # state_dir defaults to $XDG_STATE_HOME/mcpd/auth or ~/.local/state/mcpd/auth
 access_token_seconds = 3600
 authorization_code_seconds = 300
 login_session_seconds = 600
 client_metadata_timeout_seconds = 10
-
-[tls]
-# off | files | acme
-mode = "off"
-cert_file = ""
-key_file = ""
-
-# ACME settings. For Let's Encrypt IP certificates, shortlived is required.
-acme_email = ""
-acme_server = "https://acme-v02.api.letsencrypt.org/directory"
-acme_profile = "shortlived"
-# mcpd will not accept CA terms on your behalf; set this explicitly for ACME mode.
-acme_accept_tos = false
-challenge_listen = ":80"
-# cert_dir defaults to $XDG_STATE_HOME/mcpd/tls or ~/.local/state/mcpd/tls
-renew_check_seconds = 3600

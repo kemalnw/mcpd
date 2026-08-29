@@ -34,11 +34,6 @@ func installCommand(args []string) error {
 	if result.ConfigPreserved {
 		fmt.Println("Existing config preserved.")
 	}
-	if result.SocketActivation {
-		fmt.Printf("Socket activation: %v\n", result.Privileged)
-	} else {
-		fmt.Println("Socket activation: not required")
-	}
 	if result.NeedsPassword {
 		fmt.Println("OAuth is enabled, but the owner password is not configured; service start was deferred.")
 		fmt.Printf("Run: sudo mcpd auth set-password --config %s\n", service.ConfigPath)

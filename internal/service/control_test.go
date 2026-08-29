@@ -21,12 +21,9 @@ func TestLifecycleCommandsUseSystemdAndJournal(t *testing.T) {
 	t.Setenv("MCPD_TEST_COMMAND_LOG", logPath)
 
 	oldEUID := effectiveUID
-	oldSocket := socketUnitPresent
 	effectiveUID = func() int { return 0 }
-	socketUnitPresent = func() bool { return true }
 	t.Cleanup(func() {
 		effectiveUID = oldEUID
-		socketUnitPresent = oldSocket
 	})
 
 	var output bytes.Buffer
@@ -52,13 +49,11 @@ func TestLifecycleCommandsUseSystemdAndJournal(t *testing.T) {
 	}
 	got := string(data)
 	for _, want := range []string{
-		"systemctl start mcpd.socket",
 		"systemctl start mcpd.service",
 		"systemctl restart mcpd.service",
-		"systemctl status --no-pager mcpd.service mcpd.socket",
+		"systemctl status --no-pager mcpd.service",
 		"journalctl -u mcpd.service -n 7 --since 1 hour ago --no-pager",
 		"systemctl stop mcpd.service",
-		"systemctl stop mcpd.socket",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("command log missing %q:\n%s", want, got)

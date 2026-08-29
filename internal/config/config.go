@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultListen            = "0.0.0.0:8787"
+	defaultListen            = "127.0.0.1:31354"
 	defaultMCPPath           = "/mcp"
 	defaultShell             = "/bin/bash"
 	defaultWaitTimeoutMS     = 30_000
@@ -32,7 +32,6 @@ type Config struct {
 	Search  SearchConfig  `toml:"search"`
 	Audit   AuditConfig   `toml:"audit"`
 	Auth    AuthConfig    `toml:"auth"`
-	TLS     TLSConfig     `toml:"tls"`
 }
 
 type ServerConfig struct {
@@ -78,19 +77,6 @@ type AuthConfig struct {
 	ClientMetadataTimeoutSeconds int    `toml:"client_metadata_timeout_seconds"`
 }
 
-type TLSConfig struct {
-	Mode              string `toml:"mode"`
-	CertFile          string `toml:"cert_file"`
-	KeyFile           string `toml:"key_file"`
-	ACMEEmail         string `toml:"acme_email"`
-	ACMEServer        string `toml:"acme_server"`
-	ACMEProfile       string `toml:"acme_profile"`
-	ACMEAcceptTOS     bool   `toml:"acme_accept_tos"`
-	ChallengeListen   string `toml:"challenge_listen"`
-	CertDir           string `toml:"cert_dir"`
-	RenewCheckSeconds int    `toml:"renew_check_seconds"`
-}
-
 func Default() Config {
 	stateDir := DefaultStateDir()
 	return Config{
@@ -101,8 +87,6 @@ func Default() Config {
 		Audit:   AuditConfig{Enabled: true, Path: defaultAuditPath()},
 		Auth: AuthConfig{StateDir: filepath.Join(stateDir, "auth"), AccessTokenSeconds: 3600, AuthorizationCodeSeconds: 300,
 			LoginSessionSeconds: 600, ClientMetadataTimeoutSeconds: 10},
-		TLS: TLSConfig{Mode: "off", ACMEServer: "https://acme-v02.api.letsencrypt.org/directory", ACMEProfile: "shortlived",
-			ChallengeListen: ":80", CertDir: filepath.Join(stateDir, "tls"), RenewCheckSeconds: 3600},
 	}
 }
 
@@ -118,13 +102,32 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	decoded, err := Decode(data, cfg)
+	if err != nil {
 		return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 	}
+	cfg = decoded
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("validate config %q: %w", path, err)
 	}
 	return cfg, nil
+}
+
+func Decode(data []byte, base Config) (Config, error) {
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return Config{}, err
+	}
+	if _, ok := raw["tls"]; ok {
+		return Config{}, errors.New("[tls] was removed; terminate HTTPS outside mcpd and remove the tls section")
+	}
+	if err := toml.Unmarshal(data, &base); err != nil {
+		return Config{}, err
+	}
+	if err := base.Validate(); err != nil {
+		return Config{}, err
+	}
+	return base, nil
 }
 
 func (c Config) Validate() error {
@@ -150,36 +153,17 @@ func (c Config) Validate() error {
 		return errors.New("search limits contain invalid values")
 	}
 	if c.Auth.Enabled {
-		if err := validateExternalURL(c.Auth.ExternalURL); err != nil {
+		if err := ValidateExternalURL(c.Auth.ExternalURL); err != nil {
 			return err
 		}
 		if c.Auth.StateDir == "" || c.Auth.AccessTokenSeconds <= 0 || c.Auth.AuthorizationCodeSeconds <= 0 || c.Auth.LoginSessionSeconds <= 0 || c.Auth.ClientMetadataTimeoutSeconds <= 0 {
 			return errors.New("auth state path and lifetimes must be positive/non-empty")
 		}
 	}
-	switch c.TLS.Mode {
-	case "off":
-	case "files":
-		if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
-			return errors.New("tls.cert_file and tls.key_file are required when tls.mode=files")
-		}
-	case "acme":
-		if err := validateExternalURL(c.Auth.ExternalURL); err != nil {
-			return fmt.Errorf("tls.mode=acme requires auth.external_url: %w", err)
-		}
-		if c.TLS.ACMEServer == "" || c.TLS.ChallengeListen == "" || c.TLS.CertDir == "" || c.TLS.RenewCheckSeconds <= 0 {
-			return errors.New("tls ACME configuration is incomplete")
-		}
-		if !c.TLS.ACMEAcceptTOS {
-			return errors.New("tls.acme_accept_tos must be true when tls.mode=acme")
-		}
-	default:
-		return fmt.Errorf("tls.mode must be one of off, files, acme; got %q", c.TLS.Mode)
-	}
 	return nil
 }
 
-func validateExternalURL(raw string) error {
+func ValidateExternalURL(raw string) error {
 	if raw == "" {
 		return errors.New("auth.external_url is required when authentication is enabled")
 	}

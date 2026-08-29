@@ -15,15 +15,23 @@ import (
 )
 
 const (
-	argonMemory  = 64 * 1024
-	argonTime    = 3
-	argonThreads = 1
-	argonKeyLen  = 32
+	MinOwnerPasswordLength = 8
+	argonMemory            = 64 * 1024
+	argonTime              = 3
+	argonThreads           = 1
+	argonKeyLen            = 32
 )
 
+func ValidateOwnerPassword(password []byte) error {
+	if len(password) < MinOwnerPasswordLength {
+		return fmt.Errorf("owner password must be at least %d characters", MinOwnerPasswordLength)
+	}
+	return nil
+}
+
 func SetPassword(stateDir string, password []byte) error {
-	if len(password) < 12 {
-		return errors.New("owner password must be at least 12 characters")
+	if err := ValidateOwnerPassword(password); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return fmt.Errorf("create auth state directory: %w", err)
