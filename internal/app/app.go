@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kemalnw/mcpd/internal/audit"
@@ -104,14 +106,27 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	tools.RegisterFilesystem(server, files, auditStore)
 	tools.RegisterSearch(server, searches, auditStore)
 
-	mcpHandler := http.Handler(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
+	streamableOpts := &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger,
 		PropagateRequestCancellation: true,
-	}))
+	}
+	if authServer != nil {
+		// mcpd is intentionally bound to loopback behind the managed TLS reverse proxy.
+		// The SDK's localhost DNS-rebinding guard would reject the canonical public
+		// Host in that topology, so mcpd replaces it with an exact canonical-host
+		// check before traffic reaches the SDK.
+		streamableOpts.DisableLocalhostProtection = true
+	}
+	mcpHandler := http.Handler(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, streamableOpts))
 	if authServer != nil {
 		server.AddReceivingMiddleware(oauthsrv.EnforceToolScopes(authServer, tools.RequiredScope))
-		mcpHandler = oauthsrv.InjectToolSecuritySchemes(mcpHandler, tools.RequiredScope)
+		mcpHandler = oauthsrv.InjectToolSecuritySchemes(mcpHandler, tools.RequiredScope, logger)
 		mcpHandler = oauthsrv.ProtectMCP(mcpHandler, authServer)
+		mcpHandler, err = enforceCanonicalHost(mcpHandler, cfg.Auth.ExternalURL, logger)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("configure MCP canonical host validation: %w", err)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -170,10 +185,58 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return first
 }
 
+type responseMetricsWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *responseMetricsWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *responseMetricsWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseMetricsWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.bytes += n
+	return n, err
+}
+
 func accessLog(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(w, r)
-		logger.Info("http request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "duration_ms", time.Since(started).Milliseconds())
+		metrics := &responseMetricsWriter{ResponseWriter: w}
+		next.ServeHTTP(metrics, r)
+		status := metrics.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		logger.Info("http request",
+			"method", r.Method, "path", r.URL.Path, "host", r.Host, "remote", r.RemoteAddr,
+			"status", status, "response_bytes", metrics.bytes, "duration_ms", time.Since(started).Milliseconds())
 	})
+}
+
+func enforceCanonicalHost(next http.Handler, externalURL string, logger *slog.Logger) (http.Handler, error) {
+	u, err := url.Parse(externalURL)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("invalid external URL %q", externalURL)
+	}
+	expected := u.Host
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Host, expected) {
+			logger.Warn("mcp host rejected", "host", r.Host, "expected_host", expected)
+			http.Error(w, "forbidden: invalid Host header", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}), nil
 }

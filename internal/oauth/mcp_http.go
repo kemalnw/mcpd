@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -22,8 +23,15 @@ type ScopeResolver func(toolName string) string
 
 func ProtectMCP(next http.Handler, server *Server) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		method := r.Header.Get("Mcp-Method")
+		requestMethod, err := resolveMCPRequestMethod(r)
+		if err != nil {
+			server.logger.Warn("mcp auth request rejected", "reason", "invalid_jsonrpc_request", "error", err)
+			http.Error(w, "invalid MCP request", http.StatusBadRequest)
+			return
+		}
+		method := requestMethod.Method
 		if method == "server/discover" || method == "tools/list" {
+			server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "decision", "allow_discovery")
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -33,24 +41,32 @@ func ProtectMCP(next http.Handler, server *Server) http.Handler {
 			// Tool-level auth failures must reach the MCP middleware so ChatGPT can
 			// receive _meta["mcp/www_authenticate"] and launch its linking UI.
 			if present {
-				identity, err := server.VerifyBearer(raw, "")
-				if err == nil {
+				identity, verifyErr := server.VerifyBearer(raw, "")
+				if verifyErr == nil {
+					server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", true, "auth_valid", true, "client_id", identity.ClientID, "decision", "defer_tool_scope_check")
 					r = r.WithContext(context.WithValue(r.Context(), identityContextKey{}, identity))
+				} else {
+					server.logger.Warn("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", true, "auth_valid", false, "decision", "defer_tool_challenge", "reason", verifyErr.Error())
 				}
+			} else {
+				server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", false, "decision", "defer_tool_challenge")
 			}
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		if !present {
+			server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", false, "decision", "challenge")
 			writeBearerChallenge(w, server.ResourceMetadataURL(), "", http.StatusUnauthorized, "", "")
 			return
 		}
 		identity, err := server.VerifyBearer(raw, "")
 		if err != nil {
+			server.logger.Warn("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", true, "auth_valid", false, "decision", "challenge", "reason", err.Error())
 			writeBearerChallenge(w, server.ResourceMetadataURL(), "", http.StatusUnauthorized, "invalid_token", err.Error())
 			return
 		}
+		server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", true, "auth_valid", true, "client_id", identity.ClientID, "decision", "allow")
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, identity)))
 	})
 }
@@ -86,9 +102,15 @@ func escapeChallenge(value string) string {
 // InjectToolSecuritySchemes is a compatibility adapter for the current Go MCP
 // SDK, whose Tool type does not yet expose the ChatGPT securitySchemes field.
 // It mutates only JSON tools/list responses and leaves all other MCP traffic untouched.
-func InjectToolSecuritySchemes(next http.Handler, resolve ScopeResolver) http.Handler {
+func InjectToolSecuritySchemes(next http.Handler, resolve ScopeResolver, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Mcp-Method") != "tools/list" {
+		requestMethod, err := resolveMCPRequestMethod(r)
+		if err != nil {
+			logger.Warn("mcp security scheme injection skipped", "reason", "invalid_jsonrpc_request", "error", err)
+			next.ServeHTTP(w, r)
+			return
+		}
+		if requestMethod.Method != "tools/list" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -98,6 +120,9 @@ func InjectToolSecuritySchemes(next http.Handler, resolve ScopeResolver) http.Ha
 		if capture.status >= 200 && capture.status < 300 && strings.Contains(capture.header.Get("Content-Type"), "application/json") {
 			if mutated, err := injectSecuritySchemes(body, resolve); err == nil {
 				body = mutated
+				logger.Info("mcp security schemes injected", "jsonrpc_method", requestMethod.Method, "method_source", requestMethod.Source)
+			} else {
+				logger.Warn("mcp security scheme injection failed", "jsonrpc_method", requestMethod.Method, "method_source", requestMethod.Source, "error", err)
 			}
 		}
 		for key, values := range capture.header {

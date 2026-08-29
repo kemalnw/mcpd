@@ -43,6 +43,7 @@ func (s *Server) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request) 
 		"expires_in":   int64(s.opts.AccessTokenTTL.Seconds()),
 		"scope":        grant.Scope,
 	}
+	refreshIssued := false
 	if hasScope(grant.Scope, ScopeOfflineAccess) {
 		refreshToken, familyID, err := s.refresh.Issue(grant.ClientID, grant.Resource, grant.Scope, now, s.opts.RefreshTokenIdleTTL)
 		if err != nil {
@@ -51,8 +52,13 @@ func (s *Server) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		response["refresh_token"] = refreshToken
-		s.logger.Info("oauth refresh authorization issued", "client_id", grant.ClientID, "family_id", familyID)
+		refreshIssued = true
+		s.logger.Info("oauth refresh authorization issued", "client_id", grant.ClientID, "family_id", familyID, "idle_seconds", int64(s.opts.RefreshTokenIdleTTL.Seconds()))
 	}
+	s.logger.Info("oauth authorization code exchanged",
+		"client_id", grant.ClientID, "resource", grant.Resource, "scope", grant.Scope,
+		"offline_access", hasScope(grant.Scope, ScopeOfflineAccess), "refresh_token_issued", refreshIssued,
+		"access_token_seconds", int64(s.opts.AccessTokenTTL.Seconds()))
 	writeTokenResponse(w, response)
 }
 
