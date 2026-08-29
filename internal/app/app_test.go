@@ -4,15 +4,20 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kemalnw/mcpd/internal/config"
+	oauthsrv "github.com/kemalnw/mcpd/internal/oauth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -202,5 +207,63 @@ func TestNewFailsWhenFilesystemManagerConfigurationIsInvalid(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if _, err := New(cfg, logger); err == nil {
 		t.Fatal("New accepted invalid filesystem manager configuration")
+	}
+}
+
+func TestAuthEnabledToolCallChallengesBeforeOSExecution(t *testing.T) {
+	cfg := config.Default()
+	cfg.Audit.Path = filepath.Join(t.TempDir(), "audit.jsonl")
+	cfg.Auth.Enabled = true
+	cfg.Auth.ExternalURL = "https://mcp.example"
+	cfg.Auth.StateDir = filepath.Join(t.TempDir(), "auth")
+	if err := oauthsrv.SetPassword(cfg.Auth.StateDir, []byte("correct horse battery staple")); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	application, err := New(cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.searches.Close()
+	defer application.processes.Close()
+	defer application.audit.Close()
+
+	httpServer := httptest.NewServer(application.http.Handler)
+	defer httpServer.Close()
+
+	resp, err := httpServer.Client().Get(httpServer.URL + "/.well-known/oauth-protected-resource")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var metadata map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["resource"] != "https://mcp.example/mcp" {
+		t.Fatalf("protected resource = %#v", metadata["resource"])
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcpd-auth-test", Version: "dev"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint: httpServer.URL + cfg.Server.MCPPath, HTTPClient: httpServer.Client(), DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	marker := filepath.Join(t.TempDir(), "must-not-exist")
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "start_process", Arguments: map[string]any{"command": "touch " + marker, "timeout_ms": 1000, "pty": "never"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(fmt.Sprint(result.Meta["mcp/www_authenticate"]), "mcp:write") {
+		t.Fatalf("missing tool-level OAuth challenge: %#v", result)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("protected process executed without OAuth; stat err=%v", err)
 	}
 }
