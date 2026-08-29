@@ -1,0 +1,15 @@
+[server]
+listen = "0.0.0.0:8787"
+mcp_path = "/mcp"
+shutdown_seconds = 10
+
+[process]
+default_shell = "/bin/bash"
+default_wait_ms = 30000
+output_buffer_bytes = 52428800
+max_line_bytes = 1048576
+completed_sessions = 100
+
+[audit]
+enabled = true
+# path omitted: defaults to the daemon user state directory
