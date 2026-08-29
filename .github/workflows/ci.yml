@@ -46,3 +46,6 @@ jobs:
 
       - name: Build
         run: make build
+
+      - name: Release tooling
+        run: make release-test

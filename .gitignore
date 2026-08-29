@@ -16,3 +16,5 @@ mcpd.local.toml
 .idea/
 .vscode/
 .DS_Store
+
+/dist/
