@@ -82,6 +82,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		authServer, err = oauthsrv.NewServer(oauthsrv.Options{
 			IssuerURL: cfg.Auth.ExternalURL, ResourceURL: cfg.Auth.ExternalURL + cfg.Server.MCPPath, StateDir: cfg.Auth.StateDir,
 			AccessTokenTTL:        time.Duration(cfg.Auth.AccessTokenSeconds) * time.Second,
+			RefreshTokenIdleTTL:   time.Duration(cfg.Auth.RefreshTokenIdleSeconds) * time.Second,
 			AuthorizationCodeTTL:  time.Duration(cfg.Auth.AuthorizationCodeSeconds) * time.Second,
 			LoginSessionTTL:       time.Duration(cfg.Auth.LoginSessionSeconds) * time.Second,
 			ClientMetadataTimeout: time.Duration(cfg.Auth.ClientMetadataTimeoutSeconds) * time.Second,

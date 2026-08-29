@@ -21,22 +21,28 @@ import (
 )
 
 const (
-	ScopeRead  = "mcp:read"
-	ScopeWrite = "mcp:write"
+	ScopeRead          = "mcp:read"
+	ScopeWrite         = "mcp:write"
+	ScopeOfflineAccess = "offline_access"
 )
 
-var supportedScopes = []string{ScopeRead, ScopeWrite}
+var (
+	resourceScopes  = []string{ScopeRead, ScopeWrite}
+	supportedScopes = []string{ScopeRead, ScopeWrite, ScopeOfflineAccess}
+)
 
 type Options struct {
 	IssuerURL                string
 	ResourceURL              string
 	StateDir                 string
 	AccessTokenTTL           time.Duration
+	RefreshTokenIdleTTL      time.Duration
 	AuthorizationCodeTTL     time.Duration
 	LoginSessionTTL          time.Duration
 	ClientMetadataTimeout    time.Duration
 	ClientMetadataHTTPClient *http.Client
 	Logger                   *slog.Logger
+	Now                      func() time.Time
 }
 
 type Server struct {
@@ -47,6 +53,8 @@ type Server struct {
 	kid          string
 	passwordHash string
 	httpClient   *http.Client
+	refresh      *refreshStore
+	now          func() time.Time
 
 	mu      sync.Mutex
 	pending map[string]*pendingAuthorization
@@ -79,8 +87,14 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
-	if opts.AccessTokenTTL <= 0 || opts.AuthorizationCodeTTL <= 0 || opts.LoginSessionTTL <= 0 || opts.ClientMetadataTimeout <= 0 {
+	if opts.RefreshTokenIdleTTL == 0 {
+		opts.RefreshTokenIdleTTL = 30 * 24 * time.Hour
+	}
+	if opts.AccessTokenTTL <= 0 || opts.RefreshTokenIdleTTL <= 0 || opts.AuthorizationCodeTTL <= 0 || opts.LoginSessionTTL <= 0 || opts.ClientMetadataTimeout <= 0 {
 		return nil, errors.New("OAuth lifetimes and client metadata timeout must be positive")
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
 	}
 	if err := os.MkdirAll(opts.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create OAuth state directory: %w", err)
@@ -96,20 +110,24 @@ func NewServer(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	refreshStore, err := openRefreshStore(opts.StateDir)
+	if err != nil {
+		return nil, err
+	}
 	client := opts.ClientMetadataHTTPClient
 	if client == nil {
 		client = newSafeHTTPClient(opts.ClientMetadataTimeout)
 	}
 	return &Server{
 		opts: opts, logger: opts.Logger, privateKey: privateKey, publicKey: privateKey.Public().(ed25519.PublicKey), kid: kid,
-		passwordHash: passwordHash, httpClient: client, pending: make(map[string]*pendingAuthorization), codes: make(map[[32]byte]authorizationCode),
+		passwordHash: passwordHash, httpClient: client, refresh: refreshStore, now: opts.Now, pending: make(map[string]*pendingAuthorization), codes: make(map[[32]byte]authorizationCode),
 	}, nil
 }
 
 func (s *Server) ProtectedResourceMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource": s.opts.ResourceURL, "resource_name": "mcpd", "authorization_servers": []string{s.opts.IssuerURL},
-		"scopes_supported": supportedScopes, "bearer_methods_supported": []string{"header"},
+		"scopes_supported": resourceScopes, "bearer_methods_supported": []string{"header"},
 	})
 }
 
@@ -120,7 +138,7 @@ func (s *Server) AuthorizationServerMetadata(w http.ResponseWriter, _ *http.Requ
 		"token_endpoint":                                 s.opts.IssuerURL + "/oauth/token",
 		"jwks_uri":                                       s.opts.IssuerURL + "/oauth/jwks.json",
 		"response_types_supported":                       []string{"code"},
-		"grant_types_supported":                          []string{"authorization_code"},
+		"grant_types_supported":                          []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":               []string{"S256"},
 		"scopes_supported":                               supportedScopes,
 		"token_endpoint_auth_methods_supported":          []string{"none"},
@@ -183,7 +201,7 @@ func (s *Server) authorizeGET(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to create authorization transaction", http.StatusInternalServerError)
 		return
 	}
-	now := time.Now()
+	now := s.now()
 	pending := &pendingAuthorization{CreatedAt: now, ExpiresAt: now.Add(s.opts.LoginSessionTTL), ClientID: clientID,
 		ClientName: metadata.ClientName, RedirectURI: redirectURI, State: q.Get("state"), Scope: scope, Resource: resource,
 		CodeChallenge: q.Get("code_challenge")}
@@ -201,7 +219,7 @@ func (s *Server) authorizePOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	txn := r.PostForm.Get("transaction")
-	now := time.Now()
+	now := s.now()
 
 	// Claim the transaction before performing the intentionally expensive
 	// Argon2 verification. This keeps the mutex uncontended and makes concurrent
@@ -220,7 +238,7 @@ func (s *Server) authorizePOST(w http.ResponseWriter, r *http.Request) {
 
 	if !verifyPassword(s.passwordHash, []byte(r.PostForm.Get("password"))) {
 		pending.Attempts++
-		if pending.Attempts >= 5 || !pending.ExpiresAt.After(time.Now()) {
+		if pending.Attempts >= 5 || !pending.ExpiresAt.After(s.now()) {
 			http.Error(w, "authorization transaction expired", http.StatusUnauthorized)
 			return
 		}
@@ -264,52 +282,18 @@ func (s *Server) Token(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
 		return
 	}
-	if r.PostForm.Get("grant_type") != "authorization_code" {
-		oauthError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code is supported")
-		return
+	switch r.PostForm.Get("grant_type") {
+	case "authorization_code":
+		s.tokenAuthorizationCode(w, r)
+	case "refresh_token":
+		s.tokenRefresh(w, r)
+	default:
+		oauthError(w, http.StatusBadRequest, "unsupported_grant_type", "supported grant types are authorization_code and refresh_token")
 	}
-	code := r.PostForm.Get("code")
-	key := sha256.Sum256([]byte(code))
-	now := time.Now()
-	s.mu.Lock()
-	s.cleanupLocked(now)
-	grant, ok := s.codes[key]
-	if ok {
-		delete(s.codes, key)
-	}
-	s.mu.Unlock()
-	if !ok || code == "" {
-		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid or expired")
-		return
-	}
-	if grant.ClientID != r.PostForm.Get("client_id") || grant.RedirectURI != r.PostForm.Get("redirect_uri") || grant.Resource != r.PostForm.Get("resource") {
-		oauthError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding mismatch")
-		return
-	}
-	verifier := r.PostForm.Get("code_verifier")
-	if !validPKCEVerifier(verifier) || !verifyPKCE(verifier, grant.CodeChallenge) {
-		oauthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
-		return
-	}
-	jti, err := randomURLToken(16)
-	if err != nil {
-		oauthError(w, http.StatusInternalServerError, "server_error", "unable to issue access token")
-		return
-	}
-	claims := tokenClaims{Issuer: s.opts.IssuerURL, Subject: "owner", Audience: grant.Resource, Expires: now.Add(s.opts.AccessTokenTTL).Unix(),
-		IssuedAt: now.Unix(), JWTID: jti, Scope: grant.Scope, ClientID: grant.ClientID}
-	token, err := signToken(s.privateKey, s.kid, claims)
-	if err != nil {
-		oauthError(w, http.StatusInternalServerError, "server_error", "unable to issue access token")
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": int64(s.opts.AccessTokenTTL.Seconds()), "scope": grant.Scope})
 }
 
 func (s *Server) VerifyBearer(raw string, requiredScope string) (Identity, error) {
-	identity, err := verifyToken(raw, s.publicKey, s.kid, s.opts.IssuerURL, s.opts.ResourceURL, time.Now())
+	identity, err := verifyToken(raw, s.publicKey, s.kid, s.opts.IssuerURL, s.opts.ResourceURL, s.now())
 	if err != nil {
 		return Identity{}, err
 	}
@@ -333,6 +317,10 @@ func (s *Server) RootResourceMetadataURL() string {
 	return s.opts.IssuerURL + "/.well-known/oauth-protected-resource"
 }
 
+func authorizationCodeKey(code string) [32]byte {
+	return sha256.Sum256([]byte(code))
+}
+
 func (s *Server) cleanupLocked(now time.Time) {
 	for id, pending := range s.pending {
 		if !pending.ExpiresAt.After(now) {
@@ -349,7 +337,7 @@ func (s *Server) cleanupLocked(now time.Time) {
 func normalizeScope(raw string) (string, error) {
 	requested := strings.Fields(raw)
 	if len(requested) == 0 {
-		requested = append([]string(nil), supportedScopes...)
+		requested = append([]string(nil), resourceScopes...)
 	}
 	seen := make(map[string]bool)
 	out := make([]string, 0, len(requested))

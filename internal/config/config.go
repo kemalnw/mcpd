@@ -12,17 +12,18 @@ import (
 )
 
 const (
-	defaultListen            = "127.0.0.1:31354"
-	defaultMCPPath           = "/mcp"
-	defaultShell             = "/bin/bash"
-	defaultWaitTimeoutMS     = 30_000
-	defaultOutputBufferBytes = 50 << 20
-	defaultMaxLineBytes      = 1 << 20
-	defaultCompletedSessions = 100
-	defaultFileReadLines     = 1000
-	defaultNestedEntries     = 100
-	defaultHTTPTimeoutSecs   = 15
-	defaultMaxRemoteBytes    = 16 << 20
+	maxRefreshTokenIdleSeconds = 365 * 24 * 60 * 60
+	defaultListen              = "127.0.0.1:31354"
+	defaultMCPPath             = "/mcp"
+	defaultShell               = "/bin/bash"
+	defaultWaitTimeoutMS       = 30_000
+	defaultOutputBufferBytes   = 50 << 20
+	defaultMaxLineBytes        = 1 << 20
+	defaultCompletedSessions   = 100
+	defaultFileReadLines       = 1000
+	defaultNestedEntries       = 100
+	defaultHTTPTimeoutSecs     = 15
+	defaultMaxRemoteBytes      = 16 << 20
 )
 
 type Config struct {
@@ -72,6 +73,7 @@ type AuthConfig struct {
 	ExternalURL                  string `toml:"external_url"`
 	StateDir                     string `toml:"state_dir"`
 	AccessTokenSeconds           int    `toml:"access_token_seconds"`
+	RefreshTokenIdleSeconds      int    `toml:"refresh_token_idle_seconds"`
 	AuthorizationCodeSeconds     int    `toml:"authorization_code_seconds"`
 	LoginSessionSeconds          int    `toml:"login_session_seconds"`
 	ClientMetadataTimeoutSeconds int    `toml:"client_metadata_timeout_seconds"`
@@ -85,7 +87,7 @@ func Default() Config {
 		Files:   FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
 		Search:  SearchConfig{DefaultMaxResults: 1000, RetentionSeconds: 300, InitialWaitMS: 40},
 		Audit:   AuditConfig{Enabled: true, Path: defaultAuditPath()},
-		Auth: AuthConfig{StateDir: filepath.Join(stateDir, "auth"), AccessTokenSeconds: 3600, AuthorizationCodeSeconds: 300,
+		Auth: AuthConfig{StateDir: filepath.Join(stateDir, "auth"), AccessTokenSeconds: 3600, RefreshTokenIdleSeconds: 30 * 24 * 60 * 60, AuthorizationCodeSeconds: 300,
 			LoginSessionSeconds: 600, ClientMetadataTimeoutSeconds: 10},
 	}
 }
@@ -156,8 +158,11 @@ func (c Config) Validate() error {
 		if err := ValidateExternalURL(c.Auth.ExternalURL); err != nil {
 			return err
 		}
-		if c.Auth.StateDir == "" || c.Auth.AccessTokenSeconds <= 0 || c.Auth.AuthorizationCodeSeconds <= 0 || c.Auth.LoginSessionSeconds <= 0 || c.Auth.ClientMetadataTimeoutSeconds <= 0 {
+		if c.Auth.StateDir == "" || c.Auth.AccessTokenSeconds <= 0 || c.Auth.RefreshTokenIdleSeconds <= 0 || c.Auth.AuthorizationCodeSeconds <= 0 || c.Auth.LoginSessionSeconds <= 0 || c.Auth.ClientMetadataTimeoutSeconds <= 0 {
 			return errors.New("auth state path and lifetimes must be positive/non-empty")
+		}
+		if c.Auth.RefreshTokenIdleSeconds > maxRefreshTokenIdleSeconds {
+			return fmt.Errorf("auth.refresh_token_idle_seconds must be <= %d (365 days)", maxRefreshTokenIdleSeconds)
 		}
 	}
 	return nil

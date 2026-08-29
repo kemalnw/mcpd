@@ -37,6 +37,8 @@ enabled = false
 external_url = ""
 # state_dir defaults to $XDG_STATE_HOME/mcpd/auth or ~/.local/state/mcpd/auth
 access_token_seconds = 3600
+# Refresh authorization stays valid while used within this 30-day idle window.
+refresh_token_idle_seconds = 2592000
 authorization_code_seconds = 300
 login_session_seconds = 600
 client_metadata_timeout_seconds = 10

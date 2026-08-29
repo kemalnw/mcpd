@@ -79,6 +79,14 @@ one-time, short-lived in-memory values. Access tokens are Ed25519-signed JWTs an
 are checked for signature, issuer, exact MCP audience, expiry, client, and scope on
 every protected request.
 
+Long-lived authorization uses OAuth refresh tokens only when the client explicitly
+requests `offline_access`. Access tokens remain short-lived; refresh tokens are
+opaque, rotate on every successful refresh, and use a sliding inactivity timeout
+(default 30 days). Refresh-token families are bound to the original client, MCP
+resource, and granted scopes. Reuse of a rotated token revokes its family. Only
+SHA-256 token digests and authorization metadata are persisted in
+`refresh-tokens.json`; raw refresh bearer tokens are never written to server state.
+
 The current official Go MCP SDK does not yet serialize the `securitySchemes` field
 on `Tool`. A narrow HTTP compatibility adapter adds that top-level wire field only
 to `tools/list`; tool authorization itself happens in parsed MCP middleware and
