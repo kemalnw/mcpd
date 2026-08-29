@@ -17,11 +17,16 @@ const (
 	defaultOutputBufferBytes = 50 << 20
 	defaultMaxLineBytes      = 1 << 20
 	defaultCompletedSessions = 100
+	defaultFileReadLines     = 1000
+	defaultNestedEntries     = 100
+	defaultHTTPTimeoutSecs   = 15
+	defaultMaxRemoteBytes    = 16 << 20
 )
 
 type Config struct {
 	Server  ServerConfig  `toml:"server"`
 	Process ProcessConfig `toml:"process"`
+	Files   FilesConfig   `toml:"files"`
 	Audit   AuditConfig   `toml:"audit"`
 }
 
@@ -39,6 +44,14 @@ type ProcessConfig struct {
 	CompletedSessions int    `toml:"completed_sessions"`
 }
 
+type FilesConfig struct {
+	DefaultReadLines   int   `toml:"default_read_lines"`
+	MaxLineBytes       int   `toml:"max_line_bytes"`
+	NestedEntryLimit   int   `toml:"nested_entry_limit"`
+	HTTPTimeoutSeconds int   `toml:"http_timeout_seconds"`
+	MaxRemoteBytes     int64 `toml:"max_remote_bytes"`
+}
+
 type AuditConfig struct {
 	Enabled bool   `toml:"enabled"`
 	Path    string `toml:"path"`
@@ -48,6 +61,7 @@ func Default() Config {
 	return Config{
 		Server:  ServerConfig{Listen: defaultListen, MCPPath: defaultMCPPath, ShutdownSeconds: 10},
 		Process: ProcessConfig{DefaultShell: defaultShell, DefaultWaitMS: defaultWaitTimeoutMS, OutputBufferBytes: defaultOutputBufferBytes, MaxLineBytes: defaultMaxLineBytes, CompletedSessions: defaultCompletedSessions},
+		Files:   FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
 		Audit:   AuditConfig{Enabled: true, Path: defaultAuditPath()},
 	}
 }
@@ -85,6 +99,9 @@ func (c Config) Validate() error {
 	}
 	if c.Process.DefaultWaitMS < 0 || c.Process.OutputBufferBytes <= 0 || c.Process.MaxLineBytes <= 0 || c.Process.CompletedSessions < 0 {
 		return errors.New("process limits contain invalid values")
+	}
+	if c.Files.DefaultReadLines <= 0 || c.Files.MaxLineBytes <= 0 || c.Files.NestedEntryLimit <= 0 || c.Files.HTTPTimeoutSeconds <= 0 || c.Files.MaxRemoteBytes <= 0 {
+		return errors.New("files limits contain invalid values")
 	}
 	return nil
 }

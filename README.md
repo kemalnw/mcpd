@@ -13,10 +13,10 @@ The execution model is intentionally simple: tools run with the permissions of
 the Unix user running `mcpd`. Run it as an ordinary user for that user's access,
 or run it as `root` when full operating-system access is the intended behavior.
 
-> **Status:** early development. The process/terminal core is implemented on
-> the first feature branch. OAuth, TLS/public-IP setup, filesystem, search,
-> document tooling, daemon installation, and CLI lifecycle commands are on the
-> roadmap and are not production-ready yet.
+> **Status:** early development. The process/terminal core and native text/filesystem
+> facade are implemented. Search, structured document handlers, OAuth,
+> TLS/public-IP setup, daemon installation, and CLI lifecycle commands remain on
+> the roadmap and are not production-ready yet.
 
 ## Design goals
 
@@ -43,12 +43,15 @@ MCP client
 |  MCP server + tool layer  |
 +-------------+-------------+
               |
-     +--------+--------+
-     |                 |
-     v                 v
-Process manager     Audit store
-     |                 |
-     |                 +--> JSONL
+     +--------+-----------+--------+
+     |                    |        |
+     v                    v        v
+Process manager     File manager  Audit store
+     |                    |        |
+     |                    |        +--> JSONL
+     |                    +--> text/URL reads
+     |                    +--> write/edit/move
+     |                    +--> directory metadata
      |
      +--> shell commands
      +--> real PTY sessions
@@ -71,6 +74,21 @@ sessions.
 | `list_sessions` | ✅ | active and retained completed sessions |
 | `list_processes` | ✅ | Linux process inventory via `ps` |
 | `kill_process` | ✅ | terminate arbitrary visible OS process by PID |
+
+## Implemented filesystem tools
+
+| Tool | Status | Notes |
+| --- | --- | --- |
+| `read_file` | ✅ text + URL | streaming line pagination, negative tail offsets; structured formats reserved |
+| `read_multiple_files` | ✅ text | per-file errors do not abort the batch |
+| `write_file` | ✅ text | rewrite/append modes |
+| `create_directory` | ✅ | recursive parent creation |
+| `list_directory` | ✅ | recursive depth with nested-entry context protection |
+| `move_file` | ✅ | native rename/move semantics |
+| `get_file_info` | ✅ | Linux statx timestamps, permissions, type and text line metadata |
+| `edit_block` | ✅ text | exact occurrence checks, 70% fuzzy suggestion, symlink/hard-link-aware writes |
+
+Image, Excel, PDF, and DOCX support will plug into the same stable file facade.
 
 The target tool catalog is documented in [`docs/tool-contracts.md`](docs/tool-contracts.md).
 
@@ -114,9 +132,9 @@ See [`configs/mcpd.example.toml`](configs/mcpd.example.toml).
 ## Roadmap
 
 1. ✅ Stateless MCP server and process/PTY core.
-2. ⏳ Filesystem facade: text, images, metadata, directory operations.
+2. ✅ Native text/filesystem facade, URL reads, metadata, directory operations, and text `edit_block`.
 3. ⏳ Progressive search with explicit search handles and ripgrep integration.
-4. ⏳ `edit_block`, Excel, DOCX, PDF read/write capabilities.
+4. ⏳ Image, Excel, DOCX, and PDF handlers behind the existing file facade.
 5. ⏳ OAuth 2.1/CIMD and automatic TLS for public-IP endpoints.
 6. ⏳ `mcpd install/start/stop/restart/status/logs/doctor` with systemd.
 7. ⏳ Release automation, signed artifacts, checksums, and install script.

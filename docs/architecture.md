@@ -32,14 +32,14 @@ internal/tools
 internal/process
   process lifecycle, PTY, signals, output buffering/pagination
 
-internal/files          (planned)
-  file facade and format-specific handlers
+internal/filesystem
+  native filesystem facade, text/URL reads, metadata, editing
+
+internal/documents      (planned)
+  image, Excel, DOCX, PDF handlers plugged into the file facade
 
 internal/search         (planned)
   ripgrep + Office document search sessions
-
-internal/documents      (planned)
-  Excel, DOCX, PDF capability adapters
 
 internal/auth           (planned)
   OAuth 2.1 authorization/resource-server responsibilities
@@ -115,6 +115,29 @@ numbers remain monotonic through eviction.
 - `offset = 0`: read from the process cursor and advance it.
 - `offset > 0`: absolute read without changing the cursor.
 - `offset < 0`: tail-relative read without changing the cursor.
+
+## Filesystem model
+
+The MCP tool layer delegates to `internal/filesystem`; it does not call `os.*`
+directly. The current engine implements native text and filesystem operations,
+while preserving a stable facade for later structured formats.
+
+Text reads are streaming and bounded by requested line ranges rather than file
+size. Negative offsets use a tail ring buffer. Directory recursion returns all
+top-level entries and caps nested directories to prevent one dependency tree
+from consuming the entire model context.
+
+`edit_block` intentionally separates exact modification from fuzzy discovery:
+exact replacement occurs only when the observed match count equals
+`expected_replacements`. A fuzzy closest match is diagnostic only. On Linux,
+edit writes preserve symlink targets; multiply hard-linked files are rewritten
+in place to preserve inode sharing.
+
+Format dispatch currently recognizes image, Excel, PDF, and DOCX extensions and
+returns an explicit unsupported-format error until their dedicated handlers are
+implemented. This prevents binary containers from being accidentally treated
+as text while keeping the external `read_file`/`write_file`/`edit_block`
+contracts stable.
 
 ## Structured tool outputs
 

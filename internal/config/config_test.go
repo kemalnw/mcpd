@@ -32,3 +32,11 @@ func TestLoadOverlaysDefaults(t *testing.T) {
 		t.Fatalf("defaults were not preserved: %+v", cfg.Process)
 	}
 }
+
+func TestInvalidFilesConfig(t *testing.T) {
+	cfg := Default()
+	cfg.Files.DefaultReadLines = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted zero files.default_read_lines")
+	}
+}
