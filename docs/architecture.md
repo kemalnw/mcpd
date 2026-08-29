@@ -47,8 +47,11 @@ internal/oauth
 internal/tlsmgr
   certificate loading, public-IP ACME issuance, renewal and hot reload
 
-internal/daemon         (planned)
-  systemd install and service lifecycle
+internal/activation
+  systemd LISTEN_FDS parsing and privileged-listener handoff
+
+internal/service
+  systemd unit rendering, installation, lifecycle commands and doctor checks
 
 internal/audit
   normalized tool-call events + persistent JSONL
@@ -107,8 +110,38 @@ window for the approximately six-day certificate profile. CA terms must be
 explicitly accepted in configuration.
 
 The ACME challenge listener and HTTPS application listener are intentionally
-separate. The daemon/systemd milestone will make low-port ownership and startup
-configuration ergonomic without changing this runtime model.
+separate. For an unprivileged daemon using ports below 1024, systemd owns those
+listeners and passes them to mcpd through socket activation. No network-binding
+capability is added to the service, so child commands keep the permissions of the
+daemon Unix user instead of inheriting CAP_NET_BIND_SERVICE.
+
+## systemd lifecycle model
+
+`mcpd install` installs the current executable, a system config, durable state,
+and systemd units. The default daemon identity is the invoking non-root
+`SUDO_USER` when present; `--user root` is an explicit choice for full-OS mode.
+Existing `/etc/mcpd/config.toml` is preserved unless replacement is requested.
+
+The default system config binds localhost and stores audit/OAuth/TLS state under
+`/var/lib/mcpd`. systemd `StateDirectory=mcpd` reinforces ownership and mode on
+startup. The service intentionally avoids systemd filesystem/process sandboxes
+that would contradict mcpd's daemon-user permission model.
+
+For non-root services, configured listeners below port 1024 are moved into
+`mcpd.socket`. `internal/activation` validates `LISTEN_PID`, adopts file
+descriptors starting at FD 3, matches them to configured ports, and marks the
+inherited descriptors close-on-exec so MCP-spawned children cannot inherit raw
+listening sockets. The application serves HTTP or TLS on duplicated descriptors.
+
+ACME HTTP-01 can consume an activated port-80 listener independently of the main
+MCP listener. Its lightweight server remains alive for the daemon lifetime,
+returns 404 outside an active challenge, and atomically exposes only the current
+challenge token while lego performs validation.
+
+Lifecycle commands are thin systemd/journald wrappers rather than a second
+daemon supervisor. `doctor` checks installation layout, unit syntax, service
+identity, state permissions, privileged-port/socket consistency, OAuth password
+state, TLS prerequisites, and service activity.
 
 ## Process model
 
