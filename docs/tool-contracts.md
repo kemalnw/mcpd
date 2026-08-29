@@ -23,15 +23,15 @@ fields such as `origin`.
 
 | Tool | Status |
 | --- | --- |
-| `read_file` | planned |
-| `read_multiple_files` | planned |
-| `write_file` | planned |
+| `read_file` | implemented: text + URL; structured formats pending |
+| `read_multiple_files` | implemented: text |
+| `write_file` | implemented: text |
 | `write_pdf` | planned |
-| `create_directory` | planned |
-| `list_directory` | planned |
-| `move_file` | planned |
-| `get_file_info` | planned |
-| `edit_block` | planned |
+| `create_directory` | implemented |
+| `list_directory` | implemented |
+| `move_file` | implemented |
+| `get_file_info` | implemented: native/text metadata; structured metadata pending |
+| `edit_block` | implemented: text; Excel/DOCX modes pending |
 
 ### Search
 
@@ -143,25 +143,94 @@ Input: `{ "pid": integer }`.
 Operates on an arbitrary OS process rather than only an `mcpd` session. The
 operation is governed solely by the Unix permissions of the daemon user.
 
-## Planned file facade semantics
+## File facade contracts
 
-`read_file`, `write_file`, and `edit_block` will remain polymorphic facades so
-models can use a small stable tool surface across formats.
+`read_file`, `write_file`, and `edit_block` are polymorphic facades. Their
+schema already reserves format-specific parameters so adding document handlers
+does not require renaming tools or fragmenting the model-facing API.
 
-`read_file` target handlers:
+### `read_file`
 
-- text/code with line pagination,
-- URL reads,
-- PNG/JPEG/GIF/WebP image content,
-- Excel sheet/range reads,
-- PDF page/markdown reads,
-- DOCX outline mode plus raw XML pagination mode.
+```json
+{
+  "path": "string, required",
+  "isUrl": "boolean, optional; default false",
+  "offset": "integer, optional; default 0",
+  "length": "integer, optional; default configured read limit",
+  "sheet": "string, optional; reserved for spreadsheets",
+  "range": "string, optional; reserved for structured formats",
+  "options": "object, optional; format-specific"
+}
+```
 
-`edit_block` target handlers:
+Current text semantics:
 
-- exact/fuzzy text replacement,
-- Excel range replacement,
-- DOCX XML replacement.
+- `offset >= 0`: zero-based line position, returning at most `length` lines.
+- `offset < 0`: return the last `abs(offset)` lines; `length` is ignored.
+- Reads stream through the file and keep only the requested range/tail in
+  memory; the complete file is not loaded merely to paginate it.
+- `isUrl=true` performs a full textual HTTP/HTTPS fetch with response-size and
+  request-time bounds.
+
+Planned handlers behind this same tool: PNG/JPEG/GIF/WebP, Excel, PDF, and
+DOCX outline/raw-XML modes.
+
+### `read_multiple_files`
+
+Input: `{ "paths": ["..."] }`.
+
+Each path is read independently. One failed path produces an error on that item
+without aborting successful sibling reads.
+
+### `write_file`
+
+```json
+{
+  "path": "string, required",
+  "content": "string, required",
+  "mode": "rewrite | append, optional; default rewrite"
+}
+```
+
+Current handler writes text directly with the permissions of the daemon user.
+Structured format creation will reuse this facade where the format supports it.
+
+### `create_directory`, `move_file`, `list_directory`
+
+`create_directory` recursively creates missing parent directories.
+`move_file` uses native rename semantics. `list_directory` defaults to depth 2,
+returns every top-level entry, and caps each nested directory to the configured
+entry limit while returning the hidden count.
+
+### `get_file_info`
+
+Returns size, modification/access/creation timestamps when Linux exposes them,
+permissions, file/directory flags, detected file type, and for text files
+`line_count`, `last_line`, and `append_position`.
+
+### `edit_block`
+
+```json
+{
+  "file_path": "string, required",
+  "old_string": "string, text mode",
+  "new_string": "string, text mode; empty is valid",
+  "expected_replacements": "integer, optional; default 1",
+  "range": "string, structured mode",
+  "content": "any, structured mode",
+  "options": "object, optional"
+}
+```
+
+Text mode requires the exact occurrence count before modifying the file. When
+no exact match exists, `mcpd` computes the closest candidate and returns a
+character diff. Similarity of 70% or greater is reported as a correction hint,
+but fuzzy text is never modified automatically. Atomic replacement preserves
+symlink targets, and hard-linked files are edited in place so inode sharing is
+not silently broken.
+
+Planned structured edit handlers: Excel range replacement and DOCX XML
+replacement.
 
 ## Planned search semantics
 

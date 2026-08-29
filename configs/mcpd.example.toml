@@ -10,6 +10,13 @@ output_buffer_bytes = 52428800
 max_line_bytes = 1048576
 completed_sessions = 100
 
+[files]
+default_read_lines = 1000
+max_line_bytes = 1048576
+nested_entry_limit = 100
+http_timeout_seconds = 15
+max_remote_bytes = 16777216
+
 [audit]
 enabled = true
-# path omitted: defaults to the daemon user state directory
+# path defaults to $XDG_STATE_HOME/mcpd/audit.jsonl or ~/.local/state/mcpd/audit.jsonl
