@@ -1,0 +1,18 @@
+# Binaries
+/bin/
+/mcpd
+*.exe
+
+# Build/test artifacts
+*.out
+coverage.txt
+coverage.html
+
+# Local configuration and state
+.mcpd/
+mcpd.local.toml
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
