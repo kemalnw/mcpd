@@ -31,6 +31,9 @@ func TestLoadOverlaysDefaults(t *testing.T) {
 	if cfg.Process.DefaultShell != defaultShell {
 		t.Fatalf("defaults were not preserved: %+v", cfg.Process)
 	}
+	if cfg.Search.DefaultMaxResults != 1000 || cfg.Search.RetentionSeconds != 300 || cfg.Search.InitialWaitMS != 40 {
+		t.Fatalf("search defaults were not preserved: %+v", cfg.Search)
+	}
 }
 
 func TestInvalidFilesConfig(t *testing.T) {
@@ -38,5 +41,13 @@ func TestInvalidFilesConfig(t *testing.T) {
 	cfg.Files.DefaultReadLines = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() accepted zero files.default_read_lines")
+	}
+}
+
+func TestInvalidSearchConfig(t *testing.T) {
+	cfg := Default()
+	cfg.Search.RetentionSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted zero search.retention_seconds")
 	}
 }

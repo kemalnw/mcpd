@@ -13,10 +13,10 @@ The execution model is intentionally simple: tools run with the permissions of
 the Unix user running `mcpd`. Run it as an ordinary user for that user's access,
 or run it as `root` when full operating-system access is the intended behavior.
 
-> **Status:** early development. The process/terminal core and native text/filesystem
-> facade are implemented. Search, structured document handlers, OAuth,
-> TLS/public-IP setup, daemon installation, and CLI lifecycle commands remain on
-> the roadmap and are not production-ready yet.
+> **Status:** early development. Process/terminal, native text/filesystem, and
+> progressive file/content search are implemented. Structured document handlers,
+> OAuth, TLS/public-IP setup, daemon installation, and CLI lifecycle commands
+> remain on the roadmap and are not production-ready yet.
 
 ## Design goals
 
@@ -43,12 +43,14 @@ MCP client
 |  MCP server + tool layer  |
 +-------------+-------------+
               |
-     +--------+-----------+--------+
-     |                    |        |
-     v                    v        v
-Process manager     File manager  Audit store
-     |                    |        |
-     |                    |        +--> JSONL
+     +--------+-----------+-----------+--------+
+     |                    |           |        |
+     v                    v           v        v
+Process manager     File manager  Search manager  Audit store
+     |                    |           |        |
+     |                    |           |        +--> JSONL
+     |                    |           +--> ripgrep when available
+     |                    |           +--> native Go fallback
      |                    +--> text/URL reads
      |                    +--> write/edit/move
      |                    +--> directory metadata
@@ -89,6 +91,20 @@ sessions.
 | `edit_block` | ✅ text | exact occurrence checks, 70% fuzzy suggestion, symlink/hard-link-aware writes |
 
 Image, Excel, PDF, and DOCX support will plug into the same stable file facade.
+
+## Implemented search tools
+
+| Tool | Status | Notes |
+| --- | --- | --- |
+| `start_search` | ✅ | progressive files/content search; ripgrep preferred with native fallback |
+| `get_more_search_results` | ✅ | absolute-offset and negative-tail pagination |
+| `stop_search` | ✅ | cancellation preserves results already found |
+| `list_searches` | ✅ | running and retained completed searches |
+
+Search sessions are explicit application resources, not MCP transport sessions.
+Completed sessions remain readable for five minutes after their last read by
+default. `maxResults` is a global match cap. File filters are intersected with
+the main filename pattern.
 
 The target tool catalog is documented in [`docs/tool-contracts.md`](docs/tool-contracts.md).
 
@@ -133,7 +149,7 @@ See [`configs/mcpd.example.toml`](configs/mcpd.example.toml).
 
 1. ✅ Stateless MCP server and process/PTY core.
 2. ✅ Native text/filesystem facade, URL reads, metadata, directory operations, and text `edit_block`.
-3. ⏳ Progressive search with explicit search handles and ripgrep integration.
+3. ✅ Progressive search with explicit search handles, ripgrep acceleration, and native fallback.
 4. ⏳ Image, Excel, DOCX, and PDF handlers behind the existing file facade.
 5. ⏳ OAuth 2.1/CIMD and automatic TLS for public-IP endpoints.
 6. ⏳ `mcpd install/start/stop/restart/status/logs/doctor` with systemd.
