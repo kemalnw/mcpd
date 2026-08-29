@@ -78,8 +78,25 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	}
 	assertToolOK(t, processResult)
 	processStructured := requireStructuredMap(t, processResult)
-	if processStructured["state"] != "exited" {
-		t.Fatalf("unexpected process output: %#v", processStructured)
+	processPID, ok := processStructured["pid"].(float64)
+	if !ok || processPID <= 0 {
+		t.Fatalf("start_process returned invalid pid: %#v", processStructured)
+	}
+	processDeadline := time.Now().Add(5 * time.Second)
+	for processStructured["state"] != "exited" {
+		if time.Now().After(processDeadline) {
+			t.Fatalf("process did not exit: %#v", processStructured)
+		}
+		readProcessResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "read_process_output", Arguments: map[string]any{
+				"pid": int(processPID), "timeout_ms": 250, "offset": 0, "length": 100,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertToolOK(t, readProcessResult)
+		processStructured = requireStructuredMap(t, readProcessResult)
 	}
 
 	path := filepath.Join(t.TempDir(), "mcp.txt")

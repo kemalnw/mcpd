@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -54,9 +55,34 @@ func newSafeHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+var blockedMetadataPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),    // documentation
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("198.51.100.0/24"), // documentation
+	netip.MustParsePrefix("203.0.113.0/24"),  // documentation
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved
+	netip.MustParsePrefix("100::/64"),        // discard-only
+	netip.MustParsePrefix("2001:2::/48"),     // benchmarking
+	netip.MustParsePrefix("2001:db8::/32"),   // documentation
+}
+
 func publicIP(ip net.IP) bool {
-	return ip != nil && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() &&
-		!ip.IsUnspecified() && !ip.IsMulticast()
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range blockedMetadataPrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateClientID(raw string) (*url.URL, error) {
@@ -78,10 +104,14 @@ func hasDotSegment(path string) bool {
 }
 
 func fetchClientMetadata(ctx context.Context, client *http.Client, clientID string) (clientMetadata, error) {
-	if _, err := validateClientID(clientID); err != nil {
+	validatedURL, err := validateClientID(clientID)
+	if err != nil {
 		return clientMetadata{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)
+	// CIMD intentionally uses the client_id as a remote metadata URL. The
+	// dedicated HTTP client pins dialing to a DNS result that passes publicIP,
+	// refuses redirects, and bounds the response size below.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, validatedURL.String(), nil)
 	if err != nil {
 		return clientMetadata{}, err
 	}

@@ -23,18 +23,23 @@ func testManager(t *testing.T) *Manager {
 	return m
 }
 
-func TestStartReturnsCompletedProcess(t *testing.T) {
+func TestStartCapturesCompletedProcess(t *testing.T) {
 	m := testManager(t)
 	result, err := m.Start(context.Background(), StartRequest{
-		Command: "printf 'alpha\\nbeta\\n'", TimeoutMS: 1000, PTY: PTYNever,
+		Command: "printf 'alpha\\nbeta\\n'", TimeoutMS: 100, PTY: PTYNever,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.State != StateExited || result.ExitCode == nil || *result.ExitCode != 0 {
-		t.Fatalf("unexpected result: %+v", result)
+	waitForSessionExit(t, m, result.PID, 5*time.Second)
+	final, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 100})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := strings.Join(result.Output, "|"); got != "alpha|beta" {
+	if final.State != StateExited || final.ExitCode == nil || *final.ExitCode != 0 {
+		t.Fatalf("unexpected final result: %+v", final)
+	}
+	if got := strings.Join(final.Lines, "|"); got != "alpha|beta" {
 		t.Fatalf("output = %q", got)
 	}
 }
@@ -63,6 +68,7 @@ func TestReadOutputPaginationAndCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForSessionExit(t, m, result.PID, 5*time.Second)
 	first, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 2, TimeoutMS: 10})
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +89,21 @@ func TestReadOutputPaginationAndCursor(t *testing.T) {
 	}
 	if got := strings.Join(tail.Lines, ","); got != "2" {
 		t.Fatalf("unexpected tail read: %+v", tail)
+	}
+}
+
+func waitForSessionExit(t *testing.T, m *Manager, pid int, timeout time.Duration) {
+	t.Helper()
+	s, err := m.get(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-s.done:
+	case <-timer.C:
+		t.Fatalf("process %d did not exit within %s; state=%+v", pid, timeout, s.snapshot())
 	}
 }
 
