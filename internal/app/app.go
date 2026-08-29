@@ -11,6 +11,7 @@ import (
 
 	"github.com/kemalnw/mcpd/internal/audit"
 	"github.com/kemalnw/mcpd/internal/config"
+	fsmgr "github.com/kemalnw/mcpd/internal/filesystem"
 	processmgr "github.com/kemalnw/mcpd/internal/process"
 	"github.com/kemalnw/mcpd/internal/tools"
 	"github.com/kemalnw/mcpd/internal/version"
@@ -22,6 +23,7 @@ type App struct {
 	logger    *slog.Logger
 	audit     *audit.Store
 	processes *processmgr.Manager
+	files     *fsmgr.Manager
 	mcp       *mcp.Server
 	http      *http.Server
 }
@@ -43,6 +45,16 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		_ = auditStore.Close()
 		return nil, err
 	}
+	files, err := fsmgr.NewManager(fsmgr.Options{
+		DefaultReadLines: cfg.Files.DefaultReadLines, MaxLineBytes: cfg.Files.MaxLineBytes,
+		NestedEntryLimit: cfg.Files.NestedEntryLimit, HTTPTimeout: time.Duration(cfg.Files.HTTPTimeoutSeconds) * time.Second,
+		MaxRemoteBytes: cfg.Files.MaxRemoteBytes,
+	})
+	if err != nil {
+		_ = processes.Close()
+		_ = auditStore.Close()
+		return nil, err
+	}
 
 	v := version.Current()
 	server := mcp.NewServer(&mcp.Implementation{Name: "mcpd", Version: v.Version}, &mcp.ServerOptions{
@@ -51,6 +63,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		Instructions: "mcpd provides direct Linux VM process and filesystem capabilities using the permissions of the daemon user.",
 	})
 	tools.RegisterProcess(server, processes, auditStore)
+	tools.RegisterFilesystem(server, files, auditStore)
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger,
@@ -68,7 +81,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mcpd", "version": v.Version, "mcp": cfg.Server.MCPPath})
 	})
 
-	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, mcp: server}
+	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, mcp: server}
 	a.http = &http.Server{
 		Addr: cfg.Server.Listen, Handler: accessLog(logger, mux),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second,
