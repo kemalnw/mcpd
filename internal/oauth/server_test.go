@@ -61,6 +61,15 @@ func TestAuthorizationCodePKCEFlow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authorize GET = %d: %s", rec.Code, rec.Body.String())
 	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "form-action") {
+		t.Fatalf("authorization CSP must not block OAuth callback redirects: %q", csp)
+	}
+	for _, want := range []string{"default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("authorization CSP missing %q: %q", want, csp)
+		}
+	}
 	match := regexp.MustCompile(`name="transaction" value="([^"]+)"`).FindStringSubmatch(rec.Body.String())
 	if len(match) != 2 {
 		t.Fatalf("authorization page lacks transaction: %s", rec.Body.String())
