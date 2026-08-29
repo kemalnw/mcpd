@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -20,6 +21,10 @@ import (
 	"github.com/kemalnw/mcpd/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+type Options struct {
+	ChallengeListenerFactory func() (net.Listener, error)
+}
 
 type App struct {
 	cfg       config.Config
@@ -37,6 +42,10 @@ type App struct {
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
+	return NewWithOptions(cfg, logger, Options{})
+}
+
+func NewWithOptions(cfg config.Config, logger *slog.Logger, opts Options) (*App, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
@@ -100,7 +109,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	tlsManager, err := tlsmgr.New(tlsmgr.Options{
 		Mode: cfg.TLS.Mode, CertFile: cfg.TLS.CertFile, KeyFile: cfg.TLS.KeyFile, ExternalURL: cfg.Auth.ExternalURL,
 		ACMEEmail: cfg.TLS.ACMEEmail, ACMEServer: cfg.TLS.ACMEServer, ACMEProfile: cfg.TLS.ACMEProfile,
-		ACMEAcceptTOS: cfg.TLS.ACMEAcceptTOS, ChallengeListen: cfg.TLS.ChallengeListen, CertDir: cfg.TLS.CertDir,
+		ACMEAcceptTOS: cfg.TLS.ACMEAcceptTOS, ChallengeListen: cfg.TLS.ChallengeListen, ChallengeListenerFactory: opts.ChallengeListenerFactory, CertDir: cfg.TLS.CertDir,
 		RenewCheck: time.Duration(cfg.TLS.RenewCheckSeconds) * time.Second, Logger: logger,
 	})
 	if err != nil {
@@ -158,9 +167,13 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	return a, nil
 }
 
-func (a *App) Run() error {
+func (a *App) Run() error { return a.run(nil) }
+
+func (a *App) RunWithListener(listener net.Listener) error { return a.run(listener) }
+
+func (a *App) run(listener net.Listener) error {
 	a.logger.Info("mcpd starting", "listen", a.cfg.Server.Listen, "mcp_path", a.cfg.Server.MCPPath, "version", version.Current().Version,
-		"oauth", a.oauth != nil, "tls_mode", a.cfg.TLS.Mode)
+		"oauth", a.oauth != nil, "tls_mode", a.cfg.TLS.Mode, "socket_activation", listener != nil)
 	if a.tls != nil {
 		if err := a.tls.Prepare(context.Background()); err != nil {
 			return fmt.Errorf("prepare TLS: %w", err)
@@ -169,13 +182,25 @@ func (a *App) Run() error {
 		renewCtx, cancel := context.WithCancel(context.Background())
 		a.renewCancel = cancel
 		go a.tls.RunRenewal(renewCtx)
-		if err := a.http.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		var err error
+		if listener != nil {
+			err = a.http.ServeTLS(listener, "", "")
+		} else {
+			err = a.http.ListenAndServeTLS("", "")
+		}
+		if err != nil && err != http.ErrServerClosed {
 			cancel()
 			return fmt.Errorf("serve HTTPS: %w", err)
 		}
 		return nil
 	}
-	if err := a.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	var err error
+	if listener != nil {
+		err = a.http.Serve(listener)
+	} else {
+		err = a.http.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("serve HTTP: %w", err)
 	}
 	return nil
@@ -187,6 +212,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}
 	var first error
 	if err := a.http.Shutdown(ctx); err != nil {
+		first = err
+	}
+	if err := a.tls.Close(ctx); err != nil && first == nil {
 		first = err
 	}
 	if err := a.searches.Close(); err != nil && first == nil {

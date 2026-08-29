@@ -42,3 +42,22 @@ func TestAuthSetPasswordFromStdin(t *testing.T) {
 		t.Fatalf("owner.password mode = %#o, want 0600", got)
 	}
 }
+func TestInstallCommandStaged(t *testing.T) {
+	root := t.TempDir()
+	if err := installCommand([]string{"--root", root, "--no-enable", "--no-start"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(root, "usr/local/bin/mcpd"),
+		filepath.Join(root, "etc/mcpd/config.toml"),
+		filepath.Join(root, "etc/systemd/system/mcpd.service"),
+		filepath.Join(root, "var/lib/mcpd"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("staged install missing %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "etc/systemd/system/mcpd.socket")); !os.IsNotExist(err) {
+		t.Fatalf("safe default install should not create mcpd.socket, err=%v", err)
+	}
+}
