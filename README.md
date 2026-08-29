@@ -157,8 +157,9 @@ verifies the Sigstore identity of the release checksum manifest; set
 
 When an interactive terminal is available, the installer automatically launches
 `sudo mcpd setup`. The wizard asks for the public domain, service user, OAuth owner
-password, and whether external HTTPS is already configured. The normal backend and
-MCP path default to `127.0.0.1:31354` and `/mcp`.
+password, and HTTPS frontend. Managed **Caddy** is the recommended/default frontend;
+an existing reverse proxy or tunnel remains supported. The normal backend and MCP
+path default to `127.0.0.1:31354` and `/mcp`.
 
 If no terminal is available, the installer never waits for prompts: it installs the
 binary and prints `sudo mcpd setup` as the next step. Set `MCPD_SETUP=0` to suppress
@@ -207,28 +208,32 @@ require `mcp:write`.
 
 ### HTTPS termination and DNS
 
-`mcpd` does not issue, load, renew, or terminate TLS certificates. The default
-listener is `127.0.0.1:31354`; the deployment owner supplies HTTPS on port 443 and
-forwards requests to that HTTP backend. For example:
+`mcpd` remains an HTTP-only origin server. The default listener is
+`127.0.0.1:31354`; `mcpd setup` manages **Caddy** as the standard public HTTPS/TLS
+frontend:
 
 ```text
 ChatGPT
   -> HTTPS mcp.example.com:443
-  -> Caddy/nginx/HAProxy/other user-managed TLS frontend
+  -> Caddy (automatic certificate + renewal)
   -> HTTP 127.0.0.1:31354
   -> mcpd
 ```
 
-Cloudflare DNS can still host the domain. With **DNS only**, the A/AAAA record
-points clients directly at the VM, so the VM must have a user-managed HTTPS
-frontend listening on `:443`. DNS does not translate ports and does not provide
-TLS by itself. The frontend can forward to `127.0.0.1:31354`.
+For managed Caddy, the public domain must resolve to the VM and public TCP `80` and
+`443` must be reachable. Setup installs Caddy through a supported OS package
+manager, keeps `mcpd` loopback-only, manages `/etc/caddy/mcpd.caddy`, validates the
+complete Caddy configuration, and reloads or starts `caddy.service`. Existing
+unrelated Caddy sites are preserved.
 
-With **Cloudflare Proxied**, Cloudflare participates in the HTTP/TLS path; origin
-TLS/proxy policy is deployment-specific and remains outside `mcpd`.
+Cloudflare **DNS only** is compatible with this default: the A/AAAA record points
+directly at the VM and Caddy terminates TLS there. DNS alone does not terminate TLS
+or translate ports.
 
-Port 80 is not required by `mcpd`. The backend port `31354` is configurable, but
-it is the project default and should normally remain unprivileged.
+If nginx, HAProxy, Caddy, Cloudflare Tunnel, or another HTTPS frontend already owns
+public HTTPS, choose **Existing reverse proxy / tunnel** (or pass `--https-ready`).
+In that mode `mcpd` does not install or mutate Caddy. Cloudflare **Proxied**/Tunnel
+is treated as this user-managed frontend path.
 
 
 ## Setup and service lifecycle
@@ -243,9 +248,10 @@ See [`docs/setup.md`](docs/setup.md) for interactive setup, automation, reruns,
 Cloudflare/DNS examples, and the ChatGPT connection flow.
 
 `mcpd setup` is the human-facing wizard. It validates all answers before changing
-the system, writes `/etc/mcpd/config.toml`, installs/enables the single
-`mcpd.service`, configures the OAuth owner credential, starts the service, runs
-`mcpd doctor`, and checks the local `/healthz` endpoint.
+the system, writes `/etc/mcpd/config.toml`, installs/enables `mcpd.service`,
+configures the OAuth owner credential, starts the backend, provisions the selected HTTPS frontend,
+verifies public HTTPS/OAuth, and runs `mcpd doctor`. Managed Caddy owns certificate
+issuance/renewal while `mcpd` stays HTTP-only.
 
 Owner passwords have a minimum of 8 characters; a longer passphrase is recommended.
 The password is read without echo and is never passed in process arguments.
@@ -265,9 +271,11 @@ For automation, use explicit setup flags and password stdin:
 
 ```bash
 printf '%s\n' "$MCPD_OWNER_PASSWORD" | sudo mcpd setup \
-  --domain mcp.example.com --https-ready --yes --password-stdin
+  --domain mcp.example.com --yes --password-stdin
 ```
 
+Pass `--https-ready` when an existing reverse proxy or tunnel already owns public
+HTTPS and managed Caddy should not be installed or changed.
 
 `mcpd install` remains the deterministic lower-level primitive for scripts/tests
 that already provide a config. It is intentionally non-interactive:

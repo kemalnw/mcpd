@@ -1,13 +1,18 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	oauthsrv "github.com/kemalnw/mcpd/internal/oauth"
 )
@@ -98,6 +103,14 @@ func Doctor(configPath string) DoctorReport {
 	} else {
 		add("service-active", "ok", "mcpd.service is active")
 	}
+	if ManagedCaddyConfigured() {
+		addCaddyDoctorChecks(add)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	addBackendDoctorCheck(cfg.Server.Listen, add, client)
+	if cfg.Auth.Enabled && cfg.Auth.ExternalURL != "" {
+		addPublicDoctorChecks(cfg.Auth.ExternalURL, add, net.DefaultResolver, client)
+	}
 	return report
 }
 
@@ -134,4 +147,101 @@ func accountByName(name string) (Account, error) {
 	return Account{
 		User: u.Username, Group: groupName, Home: filepath.Clean(u.HomeDir), UID: uid, GID: gid,
 	}, nil
+}
+
+func addCaddyDoctorChecks(add func(string, string, string)) {
+	if _, err := exec.LookPath("caddy"); err != nil {
+		add("caddy-binary", "error", "managed Caddy config exists but caddy executable is unavailable")
+		return
+	}
+	if !ManagedCaddyImportPresent() {
+		add("caddy-config", "error", CaddyManagedConfigPath+" exists but is not imported by "+CaddyConfigPath)
+		return
+	}
+	if err := exec.Command("systemctl", "is-active", "--quiet", CaddyServiceName).Run(); err != nil {
+		add("caddy-service", "error", "managed Caddy is not active")
+	} else {
+		add("caddy-service", "ok", "caddy.service is active")
+	}
+	if err := validateCaddyConfig(); err != nil {
+		add("caddy-config", "error", err.Error())
+	} else {
+		add("caddy-config", "ok", CaddyManagedConfigPath+" is loaded by a valid Caddy configuration")
+	}
+}
+
+func addBackendDoctorCheck(listen string, add func(string, string, string), client *http.Client) {
+	rawURL, err := localHealthURL(listen)
+	if err != nil {
+		add("backend-health", "error", err.Error())
+		return
+	}
+	if err := checkHTTP200(context.Background(), client, rawURL); err != nil {
+		add("backend-health", "error", fmt.Sprintf("%s: %v", rawURL, err))
+		return
+	}
+	add("backend-health", "ok", rawURL+" is healthy")
+}
+
+func addPublicDoctorChecks(origin string, add func(string, string, string), resolver *net.Resolver, client *http.Client) {
+	u, err := url.Parse(origin)
+	if err != nil || u.Hostname() == "" {
+		add("public-dns", "error", "invalid public origin "+origin)
+		return
+	}
+	host := u.Hostname()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	addresses := []string{host}
+	if net.ParseIP(host) == nil {
+		addresses, err = resolver.LookupHost(ctx, host)
+		if err != nil || len(addresses) == 0 {
+			add("public-dns", "error", fmt.Sprintf("resolve %s: %v", host, err))
+			add("public-https", "error", "skipped because public DNS resolution failed")
+			add("public-oauth", "error", "skipped because public DNS resolution failed")
+			return
+		}
+	}
+	add("public-dns", "ok", fmt.Sprintf("%s -> %s", host, strings.Join(addresses, ", ")))
+
+	base := strings.TrimSuffix(origin, "/")
+	healthURL := base + "/healthz"
+	if err := checkHTTP200(context.Background(), client, healthURL); err != nil {
+		add("public-https", "error", fmt.Sprintf("%s: %v", healthURL, err))
+	} else {
+		add("public-https", "ok", healthURL+" is reachable with valid TLS")
+	}
+	oauthURL := base + "/.well-known/oauth-authorization-server"
+	if err := checkHTTP200(context.Background(), client, oauthURL); err != nil {
+		add("public-oauth", "error", fmt.Sprintf("%s: %v", oauthURL, err))
+	} else {
+		add("public-oauth", "ok", oauthURL+" is reachable")
+	}
+}
+
+func localHealthURL(listen string) (string, error) {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "", fmt.Errorf("parse backend listener %q: %w", listen, err)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz", nil
+}
+
+func checkHTTP200(ctx context.Context, client *http.Client, rawURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %s", resp.Status)
+	}
+	return nil
 }

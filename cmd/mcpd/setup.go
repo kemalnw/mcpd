@@ -75,7 +75,7 @@ func parseSetupFlags(args []string) (setupCLIOptions, error) {
 	fs.StringVar(&opts.ServiceUser, "user", "", "Unix service user")
 	fs.BoolVar(&opts.NoAuth, "no-auth", false, "disable OAuth authentication")
 	fs.BoolVar(&opts.PasswordStdin, "password-stdin", false, "read owner password from stdin")
-	fs.BoolVar(&opts.HTTPSReady, "https-ready", false, "record that external HTTPS is already configured")
+	fs.BoolVar(&opts.HTTPSReady, "https-ready", false, "use an existing HTTPS reverse proxy or tunnel instead of managed Caddy")
 	fs.BoolVar(&opts.Yes, "yes", false, "apply without confirmation")
 	fs.BoolVar(&opts.Reconfigure, "reconfigure", false, "replace an existing config")
 	if err := fs.Parse(args); err != nil {
@@ -161,27 +161,28 @@ func collectInteractivePlan(opts setupCLIOptions) (setupcore.Plan, []byte, error
 			return setupcore.Plan{}, nil, err
 		}
 	}
+	httpsMode := setupcore.HTTPSModeExternal
 	if !opts.HTTPSReady {
 		fmt.Println()
-		fmt.Println("HTTPS is terminated outside mcpd.")
-		fmt.Println("  1. Existing reverse proxy / tunnel")
-		fmt.Println("  2. Not configured yet")
+		fmt.Println("HTTPS frontend")
+		fmt.Println("  1. Caddy (recommended, automatic HTTPS)")
+		fmt.Println("  2. Existing reverse proxy / tunnel")
 		choice, err := promptDefault("Choice", "1")
 		if err != nil {
 			return setupcore.Plan{}, nil, err
 		}
 		switch choice {
 		case "1":
-			opts.HTTPSReady = true
+			httpsMode = setupcore.HTTPSModeCaddy
 		case "2":
-			opts.HTTPSReady = false
+			httpsMode = setupcore.HTTPSModeExternal
 		default:
 			return setupcore.Plan{}, nil, errors.New("HTTPS choice must be 1 or 2")
 		}
 	}
 	plan, err := setupcore.BuildFrom(service.SystemDefaultConfig(), setupcore.Input{
 		PublicOrigin: opts.Domain, Listen: opts.Listen, MCPPath: opts.MCPPath,
-		ServiceUser: opts.ServiceUser, OAuthEnabled: oauthEnabled, HTTPSConfigured: opts.HTTPSReady,
+		ServiceUser: opts.ServiceUser, OAuthEnabled: oauthEnabled, HTTPSMode: httpsMode,
 	})
 	if err != nil {
 		return setupcore.Plan{}, nil, err
@@ -210,9 +211,13 @@ func runNonInteractiveSetup(opts setupCLIOptions) error {
 		}
 		opts.ServiceUser = value
 	}
+	httpsMode := setupcore.HTTPSModeCaddy
+	if opts.HTTPSReady {
+		httpsMode = setupcore.HTTPSModeExternal
+	}
 	plan, err := setupcore.BuildFrom(service.SystemDefaultConfig(), setupcore.Input{
 		PublicOrigin: opts.Domain, Listen: opts.Listen, MCPPath: opts.MCPPath,
-		ServiceUser: opts.ServiceUser, OAuthEnabled: !opts.NoAuth, HTTPSConfigured: opts.HTTPSReady,
+		ServiceUser: opts.ServiceUser, OAuthEnabled: !opts.NoAuth, HTTPSMode: httpsMode,
 	})
 	if err != nil {
 		return err
@@ -254,7 +259,11 @@ func repairExistingSetup(interactive, fromStdin bool) error {
 	if err != nil {
 		return err
 	}
-	plan := setupcore.Plan{Config: cfg, PublicOrigin: cfg.Auth.ExternalURL, ServiceUser: serviceUser}
+	httpsMode := setupcore.HTTPSModeExternal
+	if service.ManagedCaddyConfigured() {
+		httpsMode = setupcore.HTTPSModeCaddy
+	}
+	plan := setupcore.Plan{Config: cfg, PublicOrigin: cfg.Auth.ExternalURL, ServiceUser: serviceUser, HTTPSMode: httpsMode}
 	var password []byte
 	if cfg.Auth.Enabled && !ownerPasswordExists(cfg.Auth.StateDir) {
 		if interactive {
@@ -282,7 +291,7 @@ func repairExistingSetup(interactive, fromStdin bool) error {
 
 func applySetup(plan setupcore.Plan, password []byte, reconfigure, existing bool) error {
 	executor := &systemSetupExecutor{reconfigure: reconfigure, existing: existing}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := setupcore.Apply(ctx, plan, setupcore.ApplyOptions{Password: password}, executor); err != nil {
 		return fmt.Errorf("setup failed: %w (run `mcpd doctor` and `mcpd logs --lines 100` for diagnostics)", err)
@@ -300,11 +309,11 @@ func applySetup(plan setupcore.Plan, password []byte, reconfigure, existing bool
 	}
 	fmt.Printf("Backend:             %s\n", plan.BackendURL())
 	fmt.Printf("Config:              %s\n", service.ConfigPath)
-	if plan.HTTPSConfigured {
-		fmt.Println("External HTTPS:      configured by deployment owner (not verified by mcpd)")
+	if plan.ManagedCaddy() {
+		fmt.Println("HTTPS frontend:      Caddy (managed by mcpd)")
+		fmt.Println("TLS:                 ready")
 	} else {
-		fmt.Println("External HTTPS:      still needs configuration")
-		fmt.Printf("Next: route your HTTPS domain to %s\n", plan.BackendURL())
+		fmt.Println("HTTPS frontend:      existing reverse proxy / tunnel")
 	}
 	return nil
 }
@@ -319,9 +328,9 @@ func printSetupSummary(plan setupcore.Plan) {
 	fmt.Printf("  backend        %s\n", plan.BackendURL())
 	fmt.Printf("  service user   %s\n", plan.ServiceUser)
 	fmt.Printf("  OAuth          %t\n", plan.Config.Auth.Enabled)
-	fmt.Printf("  external HTTPS %t\n", plan.HTTPSConfigured)
+	fmt.Printf("  HTTPS frontend %s\n", plan.HTTPSMode)
 	fmt.Println()
-	fmt.Println("mcpd itself will serve HTTP only; HTTPS remains outside mcpd.")
+	fmt.Println("mcpd serves HTTP on loopback; the selected frontend owns public HTTPS.")
 }
 
 type systemSetupExecutor struct {
@@ -346,6 +355,15 @@ func (e *systemSetupExecutor) Preflight(plan setupcore.Plan) error {
 	}
 	if !e.existing || e.reconfigure {
 		if err := checkSetupListener(plan.Config.Server.Listen, e.existing); err != nil {
+			return err
+		}
+	}
+	if plan.ManagedCaddy() {
+		host, err := plan.PublicHost()
+		if err != nil {
+			return err
+		}
+		if err := service.PreflightManagedCaddy(host); err != nil {
 			return err
 		}
 	}
@@ -420,6 +438,37 @@ func (e *systemSetupExecutor) ConfigurePassword(password []byte) error {
 
 func (e *systemSetupExecutor) Restart() error { return service.Restart(io.Discard, os.Stderr) }
 
+func (e *systemSetupExecutor) ConfigureFrontend(plan setupcore.Plan) error {
+	if !plan.ManagedCaddy() {
+		return nil
+	}
+	host, err := plan.PublicHost()
+	if err != nil {
+		return err
+	}
+	backend, err := plan.CaddyBackend()
+	if err != nil {
+		return err
+	}
+	return service.ConfigureManagedCaddy(service.CaddyOptions{Host: host, Backend: backend})
+}
+
+func (e *systemSetupExecutor) PublicHealthCheck(ctx context.Context, plan setupcore.Plan) error {
+	if plan.PublicOrigin == "" {
+		return nil
+	}
+	urls := []string{strings.TrimSuffix(plan.PublicOrigin, "/") + "/healthz"}
+	if plan.Config.Auth.Enabled {
+		urls = append(urls, strings.TrimSuffix(plan.PublicOrigin, "/")+"/.well-known/oauth-authorization-server")
+	}
+	for _, rawURL := range urls {
+		if err := waitHTTPStatus(ctx, rawURL, 60, time.Second); err != nil {
+			return fmt.Errorf("%s: %w", rawURL, err)
+		}
+	}
+	return nil
+}
+
 func (e *systemSetupExecutor) Doctor() error {
 	report := service.Doctor(service.ConfigPath)
 	if report.Healthy {
@@ -435,9 +484,13 @@ func (e *systemSetupExecutor) Doctor() error {
 }
 
 func (e *systemSetupExecutor) HealthCheck(ctx context.Context, rawURL string) error {
-	client := &http.Client{Timeout: 2 * time.Second}
+	return waitHTTPStatus(ctx, rawURL, 15, 200*time.Millisecond)
+}
+
+func waitHTTPStatus(ctx context.Context, rawURL string, attempts int, pause time.Duration) error {
+	client := &http.Client{Timeout: 3 * time.Second}
 	var last error
-	for i := 0; i < 15; i++ {
+	for i := 0; i < attempts; i++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			return err
@@ -452,7 +505,13 @@ func (e *systemSetupExecutor) HealthCheck(ctx context.Context, rawURL string) er
 		} else {
 			last = err
 		}
-		time.Sleep(200 * time.Millisecond)
+		if i+1 < attempts {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(pause):
+			}
+		}
 	}
 	return last
 }
