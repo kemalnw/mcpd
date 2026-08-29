@@ -13,10 +13,10 @@ The execution model is intentionally simple: tools run with the permissions of
 the Unix user running `mcpd`. Run it as an ordinary user for that user's access,
 or run it as `root` when full operating-system access is the intended behavior.
 
-> **Status:** early development. Process/terminal, native text/filesystem, and
-> progressive file/content search are implemented. Structured document handlers,
-> OAuth, TLS/public-IP setup, daemon installation, and CLI lifecycle commands
-> remain on the roadmap and are not production-ready yet.
+> **Status:** early development. Process/terminal, native text/filesystem, progressive
+> search, OAuth 2.1/CIMD, and HTTPS/TLS are implemented. Structured document
+> handlers, daemon installation/lifecycle commands, and release packaging remain on
+> the roadmap.
 
 ## Design goals
 
@@ -36,11 +36,11 @@ or run it as `root` when full operating-system access is the intended behavior.
 ```text
 MCP client
     |
-    | Streamable HTTP / MCP 2026-07-28
+    | HTTPS + OAuth 2.1 / MCP 2026-07-28
     v
 +---------------------------+
 |           mcpd            |
-|  MCP server + tool layer  |
+| TLS + OAuth + MCP server  |
 +-------------+-------------+
               |
      +--------+-----------+-----------+--------+
@@ -135,8 +135,57 @@ Default MCP endpoint:
 http://127.0.0.1:8787/mcp
 ```
 
-The development endpoint is intentionally unauthenticated for now. Public
-remote deployment will be enabled only together with the OAuth/TLS milestone.
+For local development, `auth.enabled = false` and `tls.mode = "off"` keep the
+endpoint on plain HTTP. Public deployments should enable OAuth and HTTPS together.
+
+## OAuth and HTTPS
+
+`mcpd` contains both the OAuth authorization server and MCP resource server. It
+implements Authorization Code + PKCE S256 and prefers Client ID Metadata
+Documents (CIMD), the registration model used by MCP `2026-07-28`.
+
+Create the owner credential without putting it in shell arguments:
+
+```bash
+mcpd auth set-password
+# non-interactive automation:
+printf '%s\n' "$MCPD_OWNER_PASSWORD" | mcpd auth set-password --password-stdin
+```
+
+A public-IP deployment uses a canonical origin and an MCP resource beneath it:
+
+```text
+OAuth issuer: https://203.0.113.10
+MCP resource: https://203.0.113.10/mcp
+```
+
+Relevant discovery endpoints are:
+
+```text
+/.well-known/oauth-protected-resource
+/.well-known/oauth-protected-resource/mcp
+/.well-known/oauth-authorization-server
+/oauth/authorize
+/oauth/token
+/oauth/jwks.json
+```
+
+Tools advertise `securitySchemes`, and an unauthenticated `tools/call` returns
+`_meta["mcp/www_authenticate"]` so clients such as ChatGPT can start account
+linking. Read-only tools require `mcp:read`; mutating/process-control tools
+require `mcp:write`.
+
+TLS modes:
+
+- `off`: local development only.
+- `files`: load an existing certificate/key pair and hot-serve it through Go TLS.
+- `acme`: obtain and renew certificates with ACME HTTP-01. The default
+  `shortlived` profile supports Let's Encrypt public IPv4/IPv6 certificates.
+
+ACME mode never accepts CA terms implicitly: set `acme_accept_tos = true`
+explicitly. HTTP-01 must be reachable on the configured challenge listener
+(default `:80`). The HTTPS listener is configured separately, normally `:443`.
+
 
 ## Configuration
 
@@ -150,8 +199,8 @@ See [`configs/mcpd.example.toml`](configs/mcpd.example.toml).
 1. ✅ Stateless MCP server and process/PTY core.
 2. ✅ Native text/filesystem facade, URL reads, metadata, directory operations, and text `edit_block`.
 3. ✅ Progressive search with explicit search handles, ripgrep acceleration, and native fallback.
-4. ⏳ Image, Excel, DOCX, and PDF handlers behind the existing file facade.
-5. ⏳ OAuth 2.1/CIMD and automatic TLS for public-IP endpoints.
+4. ⏸️ Image, Excel, DOCX, and PDF handlers — deferred until after the MVP.
+5. ✅ OAuth 2.1/CIMD, scoped tool authorization, and TLS/ACME for public-IP endpoints.
 6. ⏳ `mcpd install/start/stop/restart/status/logs/doctor` with systemd.
 7. ⏳ Release automation, signed artifacts, checksums, and install script.
 

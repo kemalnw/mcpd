@@ -41,11 +41,11 @@ internal/documents      (planned)
 internal/search
   progressive file/content sessions, ripgrep backend, native fallback
 
-internal/auth           (planned)
-  OAuth 2.1 authorization/resource-server responsibilities
+internal/oauth
+  OAuth authorization/resource server, CIMD, PKCE, JWTs, MCP auth challenges
 
-internal/tls            (planned)
-  public-IP ACME certificate lifecycle
+internal/tlsmgr
+  certificate loading, public-IP ACME issuance, renewal and hot reload
 
 internal/daemon         (planned)
   systemd install and service lifecycle
@@ -60,6 +60,55 @@ internal/config
 The tool layer depends on domain interfaces. Domain packages must not depend on
 MCP request/response types. This prevents protocol concerns from leaking into
 OS logic and keeps core behavior independently testable.
+
+## Authorization model
+
+OAuth is embedded in the same process but kept outside the tool/domain packages.
+The OAuth issuer is the canonical HTTPS origin, while the protected resource is
+the specific MCP endpoint. For example:
+
+```text
+issuer   = https://203.0.113.10
+resource = https://203.0.113.10/mcp
+```
+
+The authorization server supports Authorization Code + PKCE S256 and Client ID
+Metadata Documents. Client metadata is fetched only from public HTTPS addresses;
+redirects are disabled and resolved private/loopback/link-local addresses are
+rejected to avoid turning CIMD lookup into an SSRF primitive.
+
+Owner authentication is intentionally local: `mcpd auth set-password` stores an
+Argon2id password verifier in the daemon state directory. Authorization codes are
+one-time, short-lived in-memory values. Access tokens are Ed25519-signed JWTs and
+are checked for signature, issuer, exact MCP audience, expiry, client, and scope on
+every protected request.
+
+The current official Go MCP SDK does not yet serialize the `securitySchemes` field
+on `Tool`. A narrow HTTP compatibility adapter adds that top-level wire field only
+to `tools/list`; tool authorization itself happens in parsed MCP middleware and
+does not trust client-supplied routing headers.
+
+Read operations use `mcp:read`; operations that can mutate filesystem/process
+state use `mcp:write`. Missing or insufficient authorization on `tools/call` is
+returned as an MCP tool error containing `_meta["mcp/www_authenticate"]`, allowing
+OAuth-capable clients to start account linking.
+
+## TLS model
+
+TLS is managed by `internal/tlsmgr` and supports `off`, `files`, and `acme` modes.
+File mode loads a conventional certificate/key pair. ACME mode uses HTTP-01,
+persists the account key and certificate material with private filesystem modes,
+and hot-reloads renewed certificates through `tls.Config.GetCertificate`.
+
+For raw public-IP endpoints the default ACME profile is `shortlived`, matching
+Let's Encrypt's requirement for IP address certificates. Renewal checks run in the
+background and begin at half of the certificate lifetime, leaving a large retry
+window for the approximately six-day certificate profile. CA terms must be
+explicitly accepted in configuration.
+
+The ACME challenge listener and HTTPS application listener are intentionally
+separate. The daemon/systemd milestone will make low-port ownership and startup
+configuration ergonomic without changing this runtime model.
 
 ## Process model
 
