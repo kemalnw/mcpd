@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X github.com/kemalnw/mcpd/internal/version.Commit=$(COMMIT) \
 	-X github.com/kemalnw/mcpd/internal/version.Date=$(DATE)
 
-.PHONY: build test test-race vet fmt fmt-check tidy check clean
+.PHONY: build test test-race vet fmt fmt-check tidy check release-package release-test clean
 
 build:
 	@mkdir -p $(OUT_DIR)
@@ -35,5 +35,11 @@ tidy:
 check: fmt-check vet test
 	@git diff --check
 
+release-package:
+	./scripts/package-release.sh
+
+release-test:
+	./scripts/test-release.sh
+
 clean:
-	rm -rf $(OUT_DIR) coverage.txt coverage.html
+	rm -rf $(OUT_DIR) dist coverage.txt coverage.html

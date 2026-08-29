@@ -32,5 +32,12 @@ CIMD only over HTTPS, blocks private/loopback/link-local resolved addresses,
 disables redirects, caps metadata size, and validates exact `client_id` and
 redirect URI binding.
 
+Official release artifacts are published by the tag-driven GitHub Actions release
+workflow. Archives and the installer are covered by SHA-256 checksums, keyless
+Sigstore/Cosign bundles bound to the exact workflow/tag identity, and GitHub build
+provenance attestations. The installer always checks SHA-256 and verifies the
+Sigstore checksum-manifest signature automatically when Cosign is available; set
+`MCPD_REQUIRE_SIGNATURE=1` to make signature verification mandatory.
+
 Please report vulnerabilities privately through GitHub's security reporting
 feature rather than opening a public issue.
