@@ -87,6 +87,8 @@ func (m *Manager) startCommand(cmd *exec.Cmd, command, shell string, usePTY bool
 			return nil, fmt.Errorf("start PTY process: %w", err)
 		}
 		s := newSession(cmd, ptmx, ptmx, command, shell, true, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
+		s.pid = cmd.Process.Pid
+		s.captureWG.Add(1)
 		go m.capture(s, ptmx)
 		go m.wait(s)
 		return s, nil
@@ -96,26 +98,24 @@ func (m *Manager) startCommand(cmd *exec.Cmd, command, shell string, usePTY bool
 	if err != nil {
 		return nil, fmt.Errorf("create stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("create stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("create stderr pipe: %w", err)
-	}
+	s := newSession(cmd, stdin, stdin, command, shell, false, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
+	// Assign writers directly instead of using StdoutPipe/StderrPipe. os/exec then
+	// owns the copy goroutines and Cmd.Wait does not return until their final bytes
+	// are delivered to sessionWriter. This avoids the documented Wait-vs-Read race
+	// for very short-lived commands.
+	cmd.Stdout = sessionWriter{s: s}
+	cmd.Stderr = sessionWriter{s: s}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start process: %w", err)
 	}
-	s := newSession(cmd, stdin, stdin, command, shell, false, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
-	go m.capture(s, stdout)
-	go m.capture(s, stderr)
+	s.pid = cmd.Process.Pid
 	go m.wait(s)
 	return s, nil
 }
 
 func (m *Manager) capture(s *session, reader io.Reader) {
+	defer s.captureWG.Done()
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := reader.Read(buf)
@@ -130,11 +130,21 @@ func (m *Manager) capture(s *session, reader io.Reader) {
 
 func (m *Manager) wait(s *session) {
 	err := s.cmd.Wait()
-	if s.closer != nil {
-		_ = s.closer.Close()
+	if s.usePTY {
+		if s.closer != nil {
+			_ = s.closer.Close()
+		}
+		s.captureWG.Wait()
 	}
 	s.markExited(err)
 	m.markCompleted(s.pid)
+}
+
+type sessionWriter struct{ s *session }
+
+func (w sessionWriter) Write(p []byte) (int, error) {
+	w.s.feed(p)
+	return len(p), nil
 }
 
 func (m *Manager) waitForStart(ctx context.Context, s *session, timeout time.Duration) {

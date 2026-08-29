@@ -37,14 +37,15 @@ type session struct {
 	waitingForInput bool
 	tail            string
 
-	done     chan struct{}
-	doneOnce sync.Once
-	notify   chan struct{}
+	done      chan struct{}
+	doneOnce  sync.Once
+	captureWG sync.WaitGroup
+	notify    chan struct{}
 }
 
 func newSession(cmd *exec.Cmd, stdin io.Writer, closer io.Closer, command, shell string, usePTY bool, maxBytes, maxLineBytes int) *session {
 	return &session{
-		cmd: cmd, stdin: stdin, closer: closer, pid: cmd.Process.Pid,
+		cmd: cmd, stdin: stdin, closer: closer, pid: 0,
 		command: command, shell: shell, usePTY: usePTY,
 		startedAt: time.Now().UTC(), state: StateRunning,
 		maxBytes: maxBytes, maxLineBytes: maxLineBytes,
