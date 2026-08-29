@@ -209,6 +209,9 @@ func (s *Server) authorizeGET(w http.ResponseWriter, r *http.Request) {
 	s.cleanupLocked(now)
 	s.pending[txn] = pending
 	s.mu.Unlock()
+	s.logger.Info("oauth authorization started",
+		"client_id", clientID, "resource", resource, "scope", scope,
+		"offline_access", hasScope(scope, ScopeOfflineAccess))
 	s.renderLogin(w, txn, pending, "")
 }
 
@@ -238,6 +241,7 @@ func (s *Server) authorizePOST(w http.ResponseWriter, r *http.Request) {
 
 	if !verifyPassword(s.passwordHash, []byte(r.PostForm.Get("password"))) {
 		pending.Attempts++
+		s.logger.Warn("oauth authorization rejected", "client_id", pending.ClientID, "reason", "invalid_owner_password", "attempt", pending.Attempts)
 		if pending.Attempts >= 5 || !pending.ExpiresAt.After(s.now()) {
 			http.Error(w, "authorization transaction expired", http.StatusUnauthorized)
 			return
@@ -258,6 +262,9 @@ func (s *Server) authorizePOST(w http.ResponseWriter, r *http.Request) {
 	s.codes[sha256.Sum256([]byte(code))] = authorizationCode{ExpiresAt: now.Add(s.opts.AuthorizationCodeTTL), ClientID: pending.ClientID,
 		RedirectURI: pending.RedirectURI, Scope: pending.Scope, Resource: pending.Resource, CodeChallenge: pending.CodeChallenge}
 	s.mu.Unlock()
+	s.logger.Info("oauth authorization approved",
+		"client_id", pending.ClientID, "resource", pending.Resource, "scope", pending.Scope,
+		"offline_access", hasScope(pending.Scope, ScopeOfflineAccess))
 
 	location, err := authorizationRedirect(pending.RedirectURI, map[string]string{"code": code, "state": pending.State, "iss": s.opts.IssuerURL})
 	if err != nil {
@@ -282,7 +289,9 @@ func (s *Server) Token(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
 		return
 	}
-	switch r.PostForm.Get("grant_type") {
+	grantType := r.PostForm.Get("grant_type")
+	s.logger.Info("oauth token request", "grant_type", grantType, "client_id", r.PostForm.Get("client_id"), "resource", r.PostForm.Get("resource"))
+	switch grantType {
 	case "authorization_code":
 		s.tokenAuthorizationCode(w, r)
 	case "refresh_token":

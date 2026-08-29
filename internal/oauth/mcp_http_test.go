@@ -24,9 +24,9 @@ func TestInjectToolSecuritySchemes(t *testing.T) {
 			return ScopeRead
 		}
 		return ScopeWrite
-	})
-	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	req.Header.Set("Mcp-Method", "tools/list")
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	var envelope struct {
@@ -76,7 +76,7 @@ func TestToolAuthChallengeAndForgedHeaderCannotBypassScope(t *testing.T) {
 	base := http.Handler(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, PropagateRequestCancellation: true,
 	}))
-	handler := ProtectMCP(InjectToolSecuritySchemes(base, resolve), oauthServer)
+	handler := ProtectMCP(InjectToolSecuritySchemes(base, resolve, slog.New(slog.NewTextHandler(io.Discard, nil))), oauthServer)
 	httpServer := httptest.NewServer(handler)
 	defer httpServer.Close()
 
@@ -201,5 +201,22 @@ func TestHTTPBearerChallengeUsesRFCQuotedSyntax(t *testing.T) {
 	want := `Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp", scope="mcp:write", error="invalid_token", error_description="bad \"token\""`
 	if got != want {
 		t.Fatalf("WWW-Authenticate = %q, want %q", got, want)
+	}
+}
+
+func TestResolveMCPRequestMethodUsesBodyAndRejectsHeaderMismatch(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	got, err := resolveMCPRequestMethod(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Method != "tools/list" || got.Source != "body" {
+		t.Fatalf("resolved method = %+v, want body tools/list", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}`))
+	req.Header.Set("Mcp-Method", "tools/list")
+	if _, err := resolveMCPRequestMethod(req); err == nil || !strings.Contains(err.Error(), "disagrees") {
+		t.Fatalf("header/body mismatch was accepted: %v", err)
 	}
 }

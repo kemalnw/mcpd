@@ -119,9 +119,9 @@ For persistent authorization, `mcpd` advertises `offline_access` and rotating
 refresh-token support. Access tokens still expire after 1 hour by default, but a
 client holding a valid refresh token can renew them without asking for the owner
 password again. The refresh authorization uses a 30-day sliding idle timeout by
-default. Existing ChatGPT apps created before refresh-token support should be
-disconnected/reconnected once after upgrade so ChatGPT fetches the updated OAuth
-metadata and obtains its first refresh token.
+default. ChatGPT must request the advertised `offline_access` scope for a refresh
+token to be issued. Apps created before refresh-token support should be recreated
+after upgrade so ChatGPT re-reads discovery metadata and requests offline access.
 
 If ChatGPT cannot connect, run `mcpd doctor`. It reports the local backend and
 public layers separately (`backend-health`, `public-dns`, `public-https`, and

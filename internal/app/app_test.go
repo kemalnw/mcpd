@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -191,6 +192,75 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	}
 }
 
+func TestAuthEnabledAcceptsCanonicalPublicHostBehindLoopbackProxy(t *testing.T) {
+	cfg := config.Default()
+	cfg.Audit.Path = filepath.Join(t.TempDir(), "audit.jsonl")
+	cfg.Auth.Enabled = true
+	cfg.Auth.ExternalURL = "https://mcp.example"
+	cfg.Auth.StateDir = filepath.Join(t.TempDir(), "auth")
+	if err := oauthsrv.SetPassword(cfg.Auth.StateDir, []byte("correct horse battery staple")); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	application, err := New(cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Shutdown(context.Background())
+
+	httpServer := httptest.NewServer(application.http.Handler)
+	defer httpServer.Close()
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
+
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+cfg.Server.MCPPath, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "mcp.example"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("canonical public Host status = %d: %s", resp.StatusCode, data)
+	}
+	if !strings.Contains(string(data), `"securitySchemes"`) {
+		t.Fatalf("tools/list response lacks OAuth securitySchemes: %s", data)
+	}
+
+	req, err = http.NewRequest(http.MethodPost, httpServer.URL+cfg.Server.MCPPath, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "evil.example"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err = httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-canonical Host status = %d, want 403", resp.StatusCode)
+	}
+}
+
+type canonicalHostRoundTripper struct {
+	base http.RoundTripper
+	host string
+}
+
+func (r canonicalHostRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	clone.Host = r.host
+	return r.base.RoundTrip(clone)
+}
+
 func assertToolOK(t *testing.T, result *mcp.CallToolResult) {
 	t.Helper()
 	if result == nil || result.IsError {
@@ -247,8 +317,10 @@ func TestAuthEnabledToolCallChallengesBeforeOSExecution(t *testing.T) {
 
 	httpServer := httptest.NewServer(application.http.Handler)
 	defer httpServer.Close()
+	httpClient := httpServer.Client()
+	httpClient.Transport = canonicalHostRoundTripper{base: httpClient.Transport, host: "mcp.example"}
 
-	resp, err := httpServer.Client().Get(httpServer.URL + "/.well-known/oauth-protected-resource")
+	resp, err := httpClient.Get(httpServer.URL + "/.well-known/oauth-protected-resource")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +335,7 @@ func TestAuthEnabledToolCallChallengesBeforeOSExecution(t *testing.T) {
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "mcpd-auth-test", Version: "dev"}, nil)
 	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint: httpServer.URL + cfg.Server.MCPPath, HTTPClient: httpServer.Client(), DisableStandaloneSSE: true,
+		Endpoint: httpServer.URL + cfg.Server.MCPPath, HTTPClient: httpClient, DisableStandaloneSSE: true,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -282,5 +354,23 @@ func TestAuthEnabledToolCallChallengesBeforeOSExecution(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("protected process executed without OAuth; stat err=%v", err)
+	}
+}
+
+func TestAccessLogIncludesStatusHostAndResponseBytes(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	handler := accessLog(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "blocked", http.StatusForbidden)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "http://mcp.example/mcp", nil)
+	req.Host = "mcp.example"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	text := logs.String()
+	for _, want := range []string{`"status":403`, `"host":"mcp.example"`, `"response_bytes":8`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("access log missing %s: %s", want, text)
+		}
 	}
 }
