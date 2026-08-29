@@ -9,16 +9,10 @@ import (
 )
 
 var effectiveUID = os.Geteuid
-var socketUnitPresent = func() bool { return fileExists(SocketUnit) }
 
 func Start(stdout, stderr io.Writer) error {
 	if err := requireRoot("start"); err != nil {
 		return err
-	}
-	if socketUnitPresent() {
-		if err := runCommand(stdout, stderr, "systemctl", "start", SocketName); err != nil {
-			return err
-		}
 	}
 	return runCommand(stdout, stderr, "systemctl", "start", ServiceName)
 }
@@ -27,31 +21,17 @@ func Stop(stdout, stderr io.Writer) error {
 	if err := requireRoot("stop"); err != nil {
 		return err
 	}
-	serviceErr := runCommand(stdout, stderr, "systemctl", "stop", ServiceName)
-	if socketUnitPresent() {
-		socketErr := runCommand(stdout, stderr, "systemctl", "stop", SocketName)
-		return errors.Join(serviceErr, socketErr)
-	}
-	return serviceErr
+	return runCommand(stdout, stderr, "systemctl", "stop", ServiceName)
 }
 func Restart(stdout, stderr io.Writer) error {
 	if err := requireRoot("restart"); err != nil {
 		return err
 	}
-	if socketUnitPresent() {
-		if err := runCommand(stdout, stderr, "systemctl", "start", SocketName); err != nil {
-			return err
-		}
-	}
 	return runCommand(stdout, stderr, "systemctl", "restart", ServiceName)
 }
 
 func Status(stdout, stderr io.Writer) error {
-	args := []string{"status", "--no-pager", ServiceName}
-	if socketUnitPresent() {
-		args = append(args, SocketName)
-	}
-	return runCommand(stdout, stderr, "systemctl", args...)
+	return runCommand(stdout, stderr, "systemctl", "status", "--no-pager", ServiceName)
 }
 
 type LogOptions struct {
@@ -81,11 +61,6 @@ func requireRoot(action string) error {
 		return nil
 	}
 	return errors.New(action + " requires root; run `sudo mcpd " + action + "`")
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func commandAvailable(name string) bool {

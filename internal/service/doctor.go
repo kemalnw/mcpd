@@ -72,11 +72,7 @@ func Doctor(configPath string) DoctorReport {
 		add("service-user", "ok", fmt.Sprintf("service runs as %s (uid %d)", account.User, account.UID))
 	}
 	if commandAvailable("systemd-analyze") {
-		units := []string{ServiceUnit}
-		if fileExists(SocketUnit) {
-			units = append(units, SocketUnit)
-		}
-		cmd := exec.Command("systemd-analyze", append([]string{"verify"}, units...)...)
+		cmd := exec.Command("systemd-analyze", "verify", ServiceUnit)
 		if output, verifyErr := cmd.CombinedOutput(); verifyErr != nil {
 			add("unit-verify", "error", strings.TrimSpace(string(output)))
 		} else {
@@ -90,32 +86,11 @@ func Doctor(configPath string) DoctorReport {
 	} else {
 		add("state", "ok", StatePath+" permissions are restrictive")
 	}
-	if accountErr == nil {
-		privileged, portErr := PrivilegedListeners(cfg, account)
-		if portErr != nil {
-			add("listeners", "error", portErr.Error())
-		} else if len(privileged) > 0 && !fileExists(SocketUnit) {
-			add("socket-activation", "error", "non-root service uses privileged ports but mcpd.socket is missing")
-		} else if len(privileged) > 0 {
-			add("socket-activation", "ok", "systemd owns privileged listeners: "+strings.Join(privileged, ", "))
-		} else if fileExists(SocketUnit) {
-			add("socket-activation", "warning", "mcpd.socket exists but current config does not require privileged socket activation")
-		} else {
-			add("socket-activation", "ok", "service can bind configured ports directly")
-		}
-	}
 	if cfg.Auth.Enabled {
 		if _, err := os.Stat(oauthsrv.PasswordPath(cfg.Auth.StateDir)); err != nil {
 			add("owner-password", "error", "OAuth is enabled but owner password is not configured")
 		} else {
 			add("owner-password", "ok", "OAuth owner password verifier exists")
-		}
-	}
-	if cfg.TLS.Mode == "files" {
-		for _, path := range []string{cfg.TLS.CertFile, cfg.TLS.KeyFile} {
-			if _, err := os.Stat(path); err != nil {
-				add("tls-files", "error", fmt.Sprintf("TLS file %s is unavailable: %v", path, err))
-			}
 		}
 	}
 	if activeErr := exec.Command("systemctl", "is-active", "--quiet", ServiceName).Run(); activeErr != nil {

@@ -25,13 +25,16 @@ type InstallOptions struct {
 }
 
 type InstallResult struct {
-	Paths            Paths
-	Account          Account
-	SocketActivation bool
-	Privileged       []string
-	ConfigPreserved  bool
-	NeedsPassword    bool
+	Paths           Paths
+	Account         Account
+	ConfigPreserved bool
+	NeedsPassword   bool
 }
+
+const (
+	legacySocketUnit = "/etc/systemd/system/mcpd.socket"
+	legacySocketName = "mcpd.socket"
+)
 
 func Install(opts InstallOptions) (InstallResult, error) {
 	paths := PathsForRoot(opts.Root)
@@ -65,20 +68,14 @@ func Install(opts InstallOptions) (InstallResult, error) {
 	if err := chownTree(paths.State, account.UID, account.GID); err != nil {
 		return InstallResult{}, fmt.Errorf("chown state directory to %s: %w", account.User, err)
 	}
-	privileged, err := PrivilegedListeners(cfg, account)
-	if err != nil {
-		return InstallResult{}, err
+	if paths.Root == "/" {
+		_ = runCommand(io.Discard, io.Discard, "systemctl", "disable", "--now", legacySocketName)
 	}
-	socketActivation := len(privileged) > 0
-	if err := writeAtomic(paths.ServiceUnit, []byte(RenderService(account, socketActivation)), 0o644); err != nil {
+	if err := os.Remove(rootedPath(paths.Root, legacySocketUnit)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return InstallResult{}, fmt.Errorf("remove legacy systemd socket: %w", err)
+	}
+	if err := writeAtomic(paths.ServiceUnit, []byte(RenderService(account)), 0o644); err != nil {
 		return InstallResult{}, fmt.Errorf("install systemd service: %w", err)
-	}
-	if socketActivation {
-		if err := writeAtomic(paths.SocketUnit, []byte(RenderSocket(privileged)), 0o644); err != nil {
-			return InstallResult{}, fmt.Errorf("install systemd socket: %w", err)
-		}
-	} else if err := os.Remove(paths.SocketUnit); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return InstallResult{}, fmt.Errorf("remove stale systemd socket: %w", err)
 	}
 	needsPassword := false
 	if cfg.Auth.Enabled {
@@ -89,8 +86,7 @@ func Install(opts InstallOptions) (InstallResult, error) {
 		}
 	}
 	result := InstallResult{
-		Paths: paths, Account: account, SocketActivation: socketActivation,
-		Privileged: privileged, ConfigPreserved: preserved, NeedsPassword: needsPassword,
+		Paths: paths, Account: account, ConfigPreserved: preserved, NeedsPassword: needsPassword,
 	}
 	if paths.Root != "/" {
 		return result, nil
@@ -99,24 +95,11 @@ func Install(opts InstallOptions) (InstallResult, error) {
 		return InstallResult{}, err
 	}
 	if opts.Enable {
-		if socketActivation {
-			_ = runCommand(io.Discard, io.Discard, "systemctl", "disable", ServiceName)
-			if err := runCommand(os.Stdout, os.Stderr, "systemctl", "enable", SocketName); err != nil {
-				return InstallResult{}, err
-			}
-		} else {
-			_ = runCommand(io.Discard, io.Discard, "systemctl", "disable", SocketName)
-			if err := runCommand(os.Stdout, os.Stderr, "systemctl", "enable", ServiceName); err != nil {
-				return InstallResult{}, err
-			}
+		if err := runCommand(os.Stdout, os.Stderr, "systemctl", "enable", ServiceName); err != nil {
+			return InstallResult{}, err
 		}
 	}
 	if opts.Start && !needsPassword {
-		if socketActivation {
-			if err := runCommand(os.Stdout, os.Stderr, "systemctl", "start", SocketName); err != nil {
-				return InstallResult{}, err
-			}
-		}
 		if err := runCommand(os.Stdout, os.Stderr, "systemctl", "restart", ServiceName); err != nil {
 			return InstallResult{}, err
 		}
@@ -162,10 +145,9 @@ func installConfig(paths Paths, opts InstallOptions) (config.Config, bool, error
 
 func SystemDefaultConfig() config.Config {
 	cfg := config.Default()
-	cfg.Server.Listen = "127.0.0.1:8787"
+	cfg.Server.Listen = "127.0.0.1:31354"
 	cfg.Audit.Path = filepath.Join(StatePath, "audit.jsonl")
 	cfg.Auth.StateDir = filepath.Join(StatePath, "auth")
-	cfg.TLS.CertDir = filepath.Join(StatePath, "tls")
 	return cfg
 }
 
@@ -175,13 +157,11 @@ func LoadSystemConfig(path string) (config.Config, error) {
 	if err != nil {
 		return config.Config{}, fmt.Errorf("read system config %q: %w", path, err)
 	}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	decoded, err := config.Decode(data, cfg)
+	if err != nil {
 		return config.Config{}, fmt.Errorf("decode system config %q: %w", path, err)
 	}
-	if err := cfg.Validate(); err != nil {
-		return config.Config{}, fmt.Errorf("validate system config %q: %w", path, err)
-	}
-	return cfg, nil
+	return decoded, nil
 }
 
 func chownTree(root string, uid, gid int) error {

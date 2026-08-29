@@ -7,9 +7,7 @@ const (
 	ConfigPath  = "/etc/mcpd/config.toml"
 	StatePath   = "/var/lib/mcpd"
 	ServiceUnit = "/etc/systemd/system/mcpd.service"
-	SocketUnit  = "/etc/systemd/system/mcpd.socket"
 	ServiceName = "mcpd.service"
-	SocketName  = "mcpd.socket"
 )
 
 type Paths struct {
@@ -18,7 +16,6 @@ type Paths struct {
 	Config      string
 	State       string
 	ServiceUnit string
-	SocketUnit  string
 }
 
 func PathsForRoot(root string) Paths {
@@ -33,6 +30,6 @@ func PathsForRoot(root string) Paths {
 	}
 	return Paths{
 		Root: root, Binary: join(BinaryPath), Config: join(ConfigPath), State: join(StatePath),
-		ServiceUnit: join(ServiceUnit), SocketUnit: join(SocketUnit),
+		ServiceUnit: join(ServiceUnit),
 	}
 }

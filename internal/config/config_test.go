@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,28 +70,16 @@ func TestAuthRequiresCanonicalHTTPSOrigin(t *testing.T) {
 	}
 }
 
-func TestACMERequiresExplicitTermsAcceptance(t *testing.T) {
+func TestDefaultListenIsLocalHTTPOrigin(t *testing.T) {
 	cfg := Default()
-	cfg.Auth.ExternalURL = "https://203.0.113.10"
-	cfg.TLS.Mode = "acme"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("Validate accepted ACME without explicit terms acceptance")
-	}
-	cfg.TLS.ACMEAcceptTOS = true
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate rejected complete ACME config: %v", err)
+	if cfg.Server.Listen != "127.0.0.1:31354" {
+		t.Fatalf("default listen = %q", cfg.Server.Listen)
 	}
 }
 
-func TestTLSFilesRequiresCertificatePair(t *testing.T) {
-	cfg := Default()
-	cfg.TLS.Mode = "files"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("Validate accepted tls.mode=files without cert/key")
-	}
-	cfg.TLS.CertFile = "/tmp/cert.pem"
-	cfg.TLS.KeyFile = "/tmp/key.pem"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate rejected TLS file paths: %v", err)
+func TestDecodeRejectsRemovedTLSSection(t *testing.T) {
+	_, err := Decode([]byte("[tls]\nmode = 'acme'\n"), Default())
+	if err == nil || !strings.Contains(err.Error(), "[tls] was removed") {
+		t.Fatalf("expected removed TLS migration error, got %v", err)
 	}
 }

@@ -50,6 +50,15 @@ MCPD_VERSION="$VERSION" MCPD_RELEASE_BASE_URL="http://127.0.0.1:$PORT" \
   MCPD_INSTALL_DIR="$TMP/bin" "$ROOT/scripts/install.sh" >/dev/null
 "$TMP/bin/mcpd" version | grep -q '"version": "v0.1.0-test"'
 
+mkdir -p "$TMP/piped"
+# A piped installer has no interactive stdin. Auto setup must not consume the pipe
+# or hang; it should install the binary and print the explicit setup follow-up.
+printf 'unused-interactive-answer\n' | MCPD_SETUP=auto MCPD_VERSION="$VERSION" \
+  MCPD_RELEASE_BASE_URL="http://127.0.0.1:$PORT" MCPD_INSTALL_DIR="$TMP/piped" \
+  "$ROOT/scripts/install.sh" >"$TMP/piped.out"
+grep -q "sudo mcpd setup" "$TMP/piped.out"
+
+
 if MCPD_REQUIRE_SIGNATURE=1 MCPD_VERSION="$VERSION" \
   MCPD_RELEASE_BASE_URL="http://127.0.0.1:$PORT" MCPD_INSTALL_DIR="$TMP/required" \
   "$ROOT/scripts/install.sh" >/dev/null 2>&1; then

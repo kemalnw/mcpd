@@ -11,8 +11,7 @@ The project deliberately separates three kinds of state:
 1. **MCP transport state:** none. HTTP uses stateless MCP `2026-07-28`.
 2. **Runtime resource state:** explicit process/search handles such as PIDs and
    search IDs.
-3. **Durable daemon state:** configuration, OAuth identity, TLS material, and
-   audit history.
+3. **Durable daemon state:** configuration, OAuth identity, and audit history.
 
 This keeps protocol requests independent while still supporting REPLs,
 long-running commands, and progressive search.
@@ -44,12 +43,6 @@ internal/search
 internal/oauth
   OAuth authorization/resource server, CIMD, PKCE, JWTs, MCP auth challenges
 
-internal/tlsmgr
-  certificate loading, public-IP ACME issuance, renewal and hot reload
-
-internal/activation
-  systemd LISTEN_FDS parsing and privileged-listener handoff
-
 internal/service
   systemd unit rendering, installation, lifecycle commands and doctor checks
 
@@ -71,8 +64,8 @@ The OAuth issuer is the canonical HTTPS origin, while the protected resource is
 the specific MCP endpoint. For example:
 
 ```text
-issuer   = https://203.0.113.10
-resource = https://203.0.113.10/mcp
+issuer   = https://mcp.example.com
+resource = https://mcp.example.com/mcp
 ```
 
 The authorization server supports Authorization Code + PKCE S256 and Client ID
@@ -96,52 +89,43 @@ state use `mcp:write`. Missing or insufficient authorization on `tools/call` is
 returned as an MCP tool error containing `_meta["mcp/www_authenticate"]`, allowing
 OAuth-capable clients to start account linking.
 
-## TLS model
+## HTTP origin and HTTPS boundary
 
-TLS is managed by `internal/tlsmgr` and supports `off`, `files`, and `acme` modes.
-File mode loads a conventional certificate/key pair. ACME mode uses HTTP-01,
-persists the account key and certificate material with private filesystem modes,
-and hot-reloads renewed certificates through `tls.Config.GetCertificate`.
+`mcpd` serves plain HTTP only. The canonical public OAuth/MCP origin is configured
+with `auth.external_url` and remains HTTPS, but TLS termination is owned by the
+deployment layer rather than the daemon. The default local listener is
+`127.0.0.1:31354`.
 
-For raw public-IP endpoints the default ACME profile is `shortlived`, matching
-Let's Encrypt's requirement for IP address certificates. Renewal checks run in the
-background and begin at half of the certificate lifetime, leaving a large retry
-window for the approximately six-day certificate profile. CA terms must be
-explicitly accepted in configuration.
+A typical remote topology is:
 
-The ACME challenge listener and HTTPS application listener are intentionally
-separate. For an unprivileged daemon using ports below 1024, systemd owns those
-listeners and passes them to mcpd through socket activation. No network-binding
-capability is added to the service, so child commands keep the permissions of the
-daemon Unix user instead of inheriting CAP_NET_BIND_SERVICE.
+```text
+MCP client -> HTTPS :443 -> user-managed reverse proxy/TLS -> HTTP 127.0.0.1:31354 -> mcpd
+```
+
+DNS is independent from the backend port. With Cloudflare DNS-only records,
+clients resolve the domain directly to the origin VM; that VM must provide the
+HTTPS frontend on port 443. Port 80, certificate issuance, renewal, and TLS policy
+are outside `mcpd`.
 
 ## systemd lifecycle model
 
 `mcpd install` installs the current executable, a system config, durable state,
-and systemd units. The default daemon identity is the invoking non-root
-`SUDO_USER` when present; `--user root` is an explicit choice for full-OS mode.
-Existing `/etc/mcpd/config.toml` is preserved unless replacement is requested.
+and one `mcpd.service` unit. The default daemon identity is the invoking non-root
+`SUDO_USER` when present; `--user root` remains an explicit full-OS choice.
 
-The default system config binds localhost and stores audit/OAuth/TLS state under
-`/var/lib/mcpd`. systemd `StateDirectory=mcpd` reinforces ownership and mode on
-startup. The service intentionally avoids systemd filesystem/process sandboxes
-that would contradict mcpd's daemon-user permission model.
+The system config defaults to `127.0.0.1:31354` and stores audit/OAuth state under
+`/var/lib/mcpd`. `StateDirectory=mcpd` reinforces ownership and mode on startup.
+No companion socket unit or privileged-port handoff is required.
 
-For non-root services, configured listeners below port 1024 are moved into
-`mcpd.socket`. `internal/activation` validates `LISTEN_PID`, adopts file
-descriptors starting at FD 3, matches them to configured ports, and marks the
-inherited descriptors close-on-exec so MCP-spawned children cannot inherit raw
-listening sockets. The application serves HTTP or TLS on duplicated descriptors.
+`mcpd setup` is the human-facing orchestration layer above these primitives. It
+builds and validates a system config, preserves existing state by default, invokes
+the deterministic installer, configures OAuth when needed, restarts the service,
+runs doctor checks, and verifies the local HTTP health endpoint.
 
-ACME HTTP-01 can consume an activated port-80 listener independently of the main
-MCP listener. Its lightweight server remains alive for the daemon lifetime,
-returns 404 outside an active challenge, and atomically exposes only the current
-challenge token while lego performs validation.
-
-Lifecycle commands are thin systemd/journald wrappers rather than a second
-daemon supervisor. `doctor` checks installation layout, unit syntax, service
-identity, state permissions, privileged-port/socket consistency, OAuth password
-state, TLS prerequisites, and service activity.
+When upgrading from v0.1.x, the installer disables and removes the legacy
+`mcpd.socket` unit. Lifecycle commands are thin systemd/journald wrappers, and
+`doctor` checks installation layout, unit syntax, service identity, state
+permissions, OAuth password state, and service activity.
 
 ## Release supply-chain model
 

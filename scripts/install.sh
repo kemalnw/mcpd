@@ -6,6 +6,7 @@ VERSION=${MCPD_VERSION:-}
 INSTALL_DIR=${MCPD_INSTALL_DIR:-/usr/local/bin}
 REQUIRE_SIGNATURE=${MCPD_REQUIRE_SIGNATURE:-0}
 INSTALL_SERVICE=${MCPD_INSTALL_SERVICE:-0}
+SETUP_MODE=${MCPD_SETUP:-auto}
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -136,6 +137,40 @@ if [ "$INSTALL_SERVICE" = 1 ]; then
     echo "mcpd installer: service installation requested but sudo is unavailable" >&2
     exit 1
   fi
-else
-  echo "Next: run 'sudo mcpd install' to install the systemd service."
+  exit 0
 fi
+
+run_setup() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$INSTALL_DIR/mcpd" setup </dev/tty >/dev/tty 2>/dev/tty
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$INSTALL_DIR/mcpd" setup </dev/tty >/dev/tty 2>/dev/tty
+  else
+    echo "mcpd installer: interactive setup requires root or sudo" >&2
+    exit 1
+  fi
+}
+
+case "$SETUP_MODE" in
+  0|false|no)
+    echo "Next: run 'sudo mcpd setup' to configure the service."
+    ;;
+  1|true|yes)
+    if [ ! -t 2 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+      echo "mcpd installer: MCPD_SETUP=1 requires an interactive terminal" >&2
+      exit 1
+    fi
+    run_setup
+    ;;
+  auto)
+    if [ -t 2 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+      run_setup
+    else
+      echo "Next: run 'sudo mcpd setup' to configure the service."
+    fi
+    ;;
+  *)
+    echo "mcpd installer: MCPD_SETUP must be auto, 0, or 1" >&2
+    exit 2
+    ;;
+esac
