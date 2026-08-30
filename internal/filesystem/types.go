@@ -36,7 +36,7 @@ type ReadResult struct {
 	Source     string   `json:"source"`
 	FileType   string   `json:"file_type"`
 	MIMEType   string   `json:"mime_type,omitempty"`
-	Content    string   `json:"content"`
+	Content    string   `json:"content,omitempty"`
 	Lines      []string `json:"lines,omitempty"`
 	Offset     int      `json:"offset"`
 	ReadFrom   int      `json:"read_from"`

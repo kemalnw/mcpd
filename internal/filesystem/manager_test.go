@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -30,14 +31,21 @@ func TestReadTextPaginationAndTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Content != "one\ntwo" || got.ReadFrom != 1 || got.ReadCount != 2 || got.TotalLines != 5 || got.Remaining != 2 {
+	if strings.Join(got.Lines, "\n") != "one\ntwo" || got.Content != "" || got.ReadFrom != 1 || got.ReadCount != 2 || got.TotalLines != 5 || got.Remaining != 2 {
 		t.Fatalf("unexpected paged read: %+v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"content"`) {
+		t.Fatalf("local read serialized duplicate content: %s", encoded)
 	}
 	tail, err := m.Read(context.Background(), ReadRequest{Path: path, Offset: -2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tail.Content != "three\nfour" || tail.ReadFrom != 3 || tail.ReadCount != 2 || tail.Remaining != 0 {
+	if strings.Join(tail.Lines, "\n") != "three\nfour" || tail.Content != "" || tail.ReadFrom != 3 || tail.ReadCount != 2 || tail.Remaining != 0 {
 		t.Fatalf("unexpected tail read: %+v", tail)
 	}
 }
@@ -119,6 +127,9 @@ func TestReadMultipleIsolatesFailures(t *testing.T) {
 	if len(results) != 2 || results[0].Result == nil || results[0].Error != "" || results[1].Error == "" {
 		t.Fatalf("unexpected multi-read result: %+v", results)
 	}
+	if results[0].Result.Content != "" || strings.Join(results[0].Result.Lines, "") != "ok" {
+		t.Fatalf("multi-read duplicated or lost local text: %+v", results[0].Result)
+	}
 }
 
 func TestReadURLText(t *testing.T) {
@@ -132,8 +143,15 @@ func TestReadURLText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Source != "url" || got.Content != "remote\ntext\n" || got.TotalLines != 2 {
+	if got.Source != "url" || got.Content != "remote\ntext\n" || len(got.Lines) != 0 || got.TotalLines != 2 {
 		t.Fatalf("unexpected URL read: %+v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"lines"`) {
+		t.Fatalf("URL read serialized duplicate lines: %s", encoded)
 	}
 }
 
