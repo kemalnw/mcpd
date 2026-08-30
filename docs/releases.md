@@ -87,3 +87,16 @@ GitHub prerelease.
 Do not manually replace assets on an existing version. Publish a new version so
 checksums, signatures, provenance, tag, and release notes continue to describe a
 single immutable build.
+
+## Verify schema-changing upgrades
+
+A restarted service and a correct binary version do **not** prove that an already-connected MCP client has consumed a new tool schema. After deploying a release that changes tool inputs/outputs, verify both layers separately:
+
+```bash
+/usr/local/bin/mcpd version
+./scripts/verify-live-schema.sh https://mcp.example.com start_search pathHint
+```
+
+`verify-live-schema.sh` performs a fresh HTTP `GET /healthz` and a fresh MCP `tools/list`, then checks that the expected tool input field is present. Set `MCPD_EXPECT_VERSION=vX.Y.Z` when the live binary version must also match exactly, and `MCPD_MCP_PATH=/custom-path` for a non-default MCP endpoint.
+
+If the fresh live check passes but ChatGPT or another already-connected client still exposes the old schema, reconnect/reload that MCP connection so the client performs a new `tools/list`. Do not restart the daemon repeatedly: the remaining problem is client-side metadata caching, not the running server. This distinction should be part of every schema-changing release verification.
