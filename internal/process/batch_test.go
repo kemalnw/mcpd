@@ -254,3 +254,118 @@ func TestBatchDAGRejectsCyclesAndUnknownDependenciesBeforeStart(t *testing.T) {
 		t.Fatal("invalid DAG started processes")
 	}
 }
+
+func TestBatchCursorCanBeConsumedIndependentlyByTwoClients(t *testing.T) {
+	m := batchTestManager(t, 2)
+	root := t.TempDir()
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{Jobs: []BatchJobRequest{
+		{ID: "a", Command: "printf 'a1\\n'; while [ ! -f release ]; do sleep 0.01; done; printf 'a2\\n'", CWD: root, PTY: PTYNever},
+		{ID: "b", Command: "printf 'b1\\n'; while [ ! -f release ]; do sleep 0.01; done; printf 'b2\\n'", CWD: root, PTY: PTYNever},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.Counts.Running == 2 })
+	if baseline.Cursor == "" {
+		t.Fatal("snapshot did not return a cursor")
+	}
+	cursorA, cursorB := baseline.Cursor, baseline.Cursor
+	if err := os.WriteFile(filepath.Join(root, "release"), []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: true, Cursor: cursorA, Length: 100, TimeoutMS: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: true, Cursor: cursorB, Length: 100, TimeoutMS: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Jobs) == 0 || len(b.Jobs) == 0 {
+		t.Fatalf("one consumer hid changes from another: a=%+v b=%+v", a, b)
+	}
+	if a.Cursor == cursorA || b.Cursor == cursorB {
+		t.Fatal("consumer cursor did not advance")
+	}
+	if strings.Join(batchLines(a), ",") != strings.Join(batchLines(b), ",") {
+		t.Fatalf("independent consumers observed different deltas: a=%v b=%v", batchLines(a), batchLines(b))
+	}
+}
+
+func TestBatchCursorContinuesRemainingOutputWithoutNewGeneration(t *testing.T) {
+	m := batchTestManager(t, 2)
+	cmd := "printf '1\\n2\\n3\\n4\\n5\\n'"
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{Jobs: []BatchJobRequest{{ID: "a", Command: cmd, PTY: PTYNever}, {ID: "b", Command: cmd, PTY: PTYNever}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	page1, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: false, Length: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page2, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: true, Cursor: page1.Cursor, Length: 2, TimeoutMS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2.Jobs) != 2 {
+		t.Fatalf("remaining output was not returned: %+v", page2)
+	}
+	for _, job := range page2.Jobs {
+		if strings.Join(job.Lines, ",") != "3,4" || job.Remaining != 1 {
+			t.Fatalf("unexpected continuation page: %+v", job)
+		}
+	}
+}
+
+func TestBatchCursorReportsEvictedHistory(t *testing.T) {
+	m, err := NewManager(Options{DefaultShell: "/bin/bash", DefaultWaitMS: 50, InitialOutputLines: 20, OutputBufferBytes: 64, MaxLineBytes: 1 << 16, CompletedSessions: 20, BatchMaxParallel: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	root := t.TempDir()
+	cmd := "while [ ! -f release ]; do sleep 0.01; done; for i in $(seq 1 30); do printf 'line-%02d-xxxxxxxx\\n' \"$i\"; done"
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{Jobs: []BatchJobRequest{{ID: "a", Command: cmd, CWD: root, PTY: PTYNever}, {ID: "b", Command: cmd, CWD: root, PTY: PTYNever}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.Counts.Running == 2 })
+	if err := os.WriteFile(filepath.Join(root, "release"), []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	resumed, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: true, Cursor: baseline.Cursor, Length: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range resumed.Jobs {
+		if !job.CursorEvicted || job.EvictedLines == 0 {
+			t.Fatalf("evicted cursor was silent: %+v", job)
+		}
+	}
+}
+
+func TestBatchCursorRejectsDifferentBatch(t *testing.T) {
+	m := batchTestManager(t, 2)
+	one, err := m.StartBatch(context.Background(), BatchStartRequest{Jobs: []BatchJobRequest{{ID: "a", Command: "true"}, {ID: "b", Command: "true"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := m.StartBatch(context.Background(), BatchStartRequest{Jobs: []BatchJobRequest{{ID: "a", Command: "true"}, {ID: "b", Command: "true"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: two.BatchID, Cursor: one.Cursor, OnlyChanged: true}); err == nil {
+		t.Fatal("cursor from another batch was accepted")
+	}
+}
+
+func batchLines(result BatchResult) []string {
+	out := []string{}
+	for _, job := range result.Jobs {
+		out = append(out, job.Lines...)
+	}
+	return out
+}

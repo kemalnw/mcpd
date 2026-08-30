@@ -61,8 +61,9 @@ type StartProcessBatchInput struct {
 type ReadProcessBatchInput struct {
 	BatchID     string `json:"batch_id" jsonschema:"batch identifier returned by start_process_batch"`
 	TimeoutMS   int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for a batch change when only_changed is true; defaults to 5000"`
-	Length      int    `json:"length,omitempty" jsonschema:"maximum new output lines per changed job; defaults to 100"`
-	OnlyChanged *bool  `json:"only_changed,omitempty" jsonschema:"return only jobs changed since the previous batch read; defaults to true"`
+	Length      int    `json:"length,omitempty" jsonschema:"maximum output lines per returned job; defaults to 100"`
+	OnlyChanged *bool  `json:"only_changed,omitempty" jsonschema:"with a cursor, return only state/output not yet observed by that cursor; without a cursor, wait from call-time baseline; defaults to true"`
+	Cursor      string `json:"cursor,omitempty" jsonschema:"opaque caller-owned cursor returned by start_process_batch/read_process_batch; pass it back so independent clients do not consume each other's progress"`
 }
 
 type BatchIDInput struct {
@@ -129,7 +130,7 @@ func (t *ProcessTools) readBatch(ctx context.Context, in ReadProcessBatchInput) 
 	if in.OnlyChanged != nil {
 		onlyChanged = *in.OnlyChanged
 	}
-	return t.manager.ReadBatch(ctx, processmgr.BatchReadRequest{BatchID: in.BatchID, TimeoutMS: in.TimeoutMS, Length: in.Length, OnlyChanged: onlyChanged})
+	return t.manager.ReadBatch(ctx, processmgr.BatchReadRequest{BatchID: in.BatchID, TimeoutMS: in.TimeoutMS, Length: in.Length, OnlyChanged: onlyChanged, Cursor: in.Cursor})
 }
 
 func (t *ProcessTools) cancelBatch(_ context.Context, in BatchIDInput) (processmgr.BatchCancelResult, error) {

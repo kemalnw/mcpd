@@ -3,7 +3,9 @@ package process
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -57,6 +59,7 @@ type BatchReadRequest struct {
 	TimeoutMS   int
 	Length      int
 	OnlyChanged bool
+	Cursor      string
 }
 
 type BatchJobResult struct {
@@ -72,6 +75,8 @@ type BatchJobResult struct {
 	ReadCount       int           `json:"read_count"`
 	TotalLines      int           `json:"total_lines"`
 	Remaining       int           `json:"remaining"`
+	EvictedLines    int64         `json:"evicted_lines"`
+	CursorEvicted   bool          `json:"cursor_evicted,omitempty"`
 	WaitingForInput bool          `json:"waiting_for_input"`
 	RuntimeMS       int64         `json:"runtime_ms"`
 	Error           string        `json:"error,omitempty"`
@@ -94,6 +99,7 @@ type BatchResult struct {
 	MaxParallel int              `json:"max_parallel"`
 	Counts      BatchCounts      `json:"counts"`
 	Jobs        []BatchJobResult `json:"jobs,omitempty"`
+	Cursor      string           `json:"cursor"`
 }
 
 type BatchCancelResult struct {
@@ -115,15 +121,25 @@ type processBatch struct {
 }
 
 type batchJob struct {
-	req                 BatchJobRequest
-	session             *session
-	pid                 int
-	state               BatchJobState
-	err                 string
-	changeGeneration    uint64
-	lastDeliveredChange uint64
-	cursorAbs           int64
-	cursorGeneration    uint64
+	req              BatchJobRequest
+	session          *session
+	pid              int
+	state            BatchJobState
+	err              string
+	changeGeneration uint64
+}
+
+type batchCursor struct {
+	Version    int                       `json:"version"`
+	BatchID    string                    `json:"batch_id"`
+	Generation uint64                    `json:"generation"`
+	Jobs       map[string]batchJobCursor `json:"jobs"`
+}
+
+type batchJobCursor struct {
+	ChangeGeneration uint64 `json:"change_generation"`
+	OutputAbs        int64  `json:"output_abs"`
+	OutputGeneration uint64 `json:"output_generation"`
 }
 
 func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchResult, error) {
@@ -186,7 +202,7 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 	if waitMS > 0 {
 		m.waitForBatchChange(ctx, b, 0, time.Duration(waitMS)*time.Millisecond)
 	}
-	return m.readBatchSnapshot(b, false, defaultBatchReadLines), nil
+	return m.readBatchSnapshot(b, false, defaultBatchReadLines, batchCursor{Version: 1, BatchID: b.id, Jobs: make(map[string]batchJobCursor)}), nil
 }
 
 func (m *Manager) ReadBatch(ctx context.Context, req BatchReadRequest) (BatchResult, error) {
@@ -203,16 +219,38 @@ func (m *Manager) ReadBatch(ctx context.Context, req BatchReadRequest) (BatchRes
 	if req.Length <= 0 {
 		req.Length = defaultBatchReadLines
 	}
+
+	var cursor batchCursor
+	if req.Cursor != "" {
+		cursor, err = decodeBatchCursor(req.Cursor)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		if cursor.BatchID != req.BatchID {
+			return BatchResult{}, errors.New("batch cursor belongs to a different batch")
+		}
+	} else if req.OnlyChanged {
+		// Compatibility behavior for changed-only reads without a cursor: establish
+		// a baseline at call time and wait for the next change. Resumable callers
+		// should first take a snapshot and then pass the returned opaque cursor.
+		m.batchMu.Lock()
+		cursor = m.currentBatchCursorLocked(b)
+		m.batchMu.Unlock()
+	} else {
+		cursor = batchCursor{Version: 1, BatchID: b.id, Jobs: make(map[string]batchJobCursor)}
+	}
+
 	if req.OnlyChanged {
 		m.batchMu.Lock()
-		baseline := b.generation
+		baseline := cursor.Generation
 		terminal := b.state != BatchRunning
+		unread := m.batchCursorHasUnreadLocked(b, cursor)
 		m.batchMu.Unlock()
-		if !terminal {
+		if !terminal && !unread {
 			m.waitForBatchChange(ctx, b, baseline, time.Duration(req.TimeoutMS)*time.Millisecond)
 		}
 	}
-	return m.readBatchSnapshot(b, req.OnlyChanged, req.Length), nil
+	return m.readBatchSnapshot(b, req.OnlyChanged, req.Length, cursor), nil
 }
 
 func (m *Manager) CancelBatch(batchID string) (BatchCancelResult, error) {
@@ -492,27 +530,83 @@ func (m *Manager) waitForBatchChange(ctx context.Context, b *processBatch, basel
 	}
 }
 
-func (m *Manager) readBatchSnapshot(b *processBatch, onlyChanged bool, length int) BatchResult {
+func (m *Manager) currentBatchCursorLocked(b *processBatch) batchCursor {
+	cursor := batchCursor{Version: 1, BatchID: b.id, Generation: b.generation, Jobs: make(map[string]batchJobCursor, len(b.jobs))}
+	for _, job := range b.jobs {
+		state := batchJobCursor{ChangeGeneration: job.changeGeneration}
+		if job.session != nil {
+			s := job.session
+			s.mu.Lock()
+			state.OutputAbs = s.totalLinesLocked()
+			state.OutputGeneration = s.outputGeneration
+			s.mu.Unlock()
+		}
+		cursor.Jobs[job.req.ID] = state
+	}
+	return cursor
+}
+
+func (m *Manager) batchCursorHasUnreadLocked(b *processBatch, cursor batchCursor) bool {
+	if b.generation > cursor.Generation {
+		return true
+	}
+	for _, job := range b.jobs {
+		state := cursor.Jobs[job.req.ID]
+		if job.changeGeneration > state.ChangeGeneration {
+			return true
+		}
+		if job.session != nil {
+			s := job.session
+			s.mu.Lock()
+			unread := s.totalLinesLocked() > state.OutputAbs || s.outputGeneration > state.OutputGeneration
+			s.mu.Unlock()
+			if unread {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *Manager) readBatchSnapshot(b *processBatch, onlyChanged bool, length int, cursor batchCursor) BatchResult {
 	m.batchMu.Lock()
 	defer m.batchMu.Unlock()
+	if cursor.Jobs == nil {
+		cursor.Jobs = make(map[string]batchJobCursor, len(b.jobs))
+	}
+	nextJobs := make(map[string]batchJobCursor, len(b.jobs))
 	result := BatchResult{BatchID: b.id, State: b.state, Generation: b.generation, MaxParallel: b.maxParallel}
 	for _, job := range b.jobs {
 		result.Counts.add(job.state)
-		if onlyChanged && job.changeGeneration == job.lastDeliveredChange {
+		state := cursor.Jobs[job.req.ID]
+		changed := job.changeGeneration > state.ChangeGeneration
+		if job.session != nil && !changed {
+			s := job.session
+			s.mu.Lock()
+			changed = s.totalLinesLocked() > state.OutputAbs || s.outputGeneration > state.OutputGeneration
+			s.mu.Unlock()
+		}
+		if onlyChanged && !changed {
+			nextJobs[job.req.ID] = state
 			continue
 		}
 		jr := BatchJobResult{ID: job.req.ID, PID: job.pid, State: job.state, Error: job.err}
 		if job.session != nil {
-			fillBatchJobDelta(job, &jr, length)
+			state = fillBatchJobDelta(job, state, &jr, length)
 		}
-		job.lastDeliveredChange = job.changeGeneration
+		state.ChangeGeneration = job.changeGeneration
+		nextJobs[job.req.ID] = state
 		result.Jobs = append(result.Jobs, jr)
 	}
+	cursor.Version = 1
+	cursor.Generation = b.generation
+	cursor.Jobs = nextJobs
+	result.Cursor = encodeBatchCursor(cursor)
 	sort.SliceStable(result.Jobs, func(i, j int) bool { return result.Jobs[i].ID < result.Jobs[j].ID })
 	return result
 }
 
-func fillBatchJobDelta(job *batchJob, out *BatchJobResult, length int) {
+func fillBatchJobDelta(job *batchJob, cursor batchJobCursor, out *BatchJobResult, length int) batchJobCursor {
 	s := job.session
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -520,8 +614,9 @@ func fillBatchJobDelta(job *batchJob, out *BatchJobResult, length int) {
 	streams := s.snapshotStreamsLocked()
 	retainedStart := s.evictedLines
 	total := retainedStart + int64(len(lines))
-	start := job.cursorAbs
+	start := cursor.OutputAbs
 	if start < retainedStart {
+		out.CursorEvicted = true
 		start = retainedStart
 	}
 	if start > total {
@@ -537,19 +632,47 @@ func fillBatchJobDelta(job *batchJob, out *BatchJobResult, length int) {
 	} else {
 		out.Lines = append([]string(nil), lines[localStart:localEnd]...)
 	}
-	if end == start && s.outputGeneration > job.cursorGeneration {
+	if end == start && s.outputGeneration > cursor.OutputGeneration {
 		out.LatestLine = s.latestLineLocked()
 	}
-	job.cursorAbs = end
-	job.cursorGeneration = s.outputGeneration
+	cursor.OutputAbs = end
+	cursor.OutputGeneration = s.outputGeneration
 	out.ExitCode = cloneInt(s.exitCode)
 	out.Generation = s.outputGeneration
 	out.ReadFrom = int(start)
 	out.ReadCount = int(end - start)
 	out.TotalLines = int(total)
 	out.Remaining = int(total - end)
+	out.EvictedLines = s.evictedLines
 	out.WaitingForInput = s.waitingForInput
 	out.RuntimeMS = time.Since(s.startedAt).Milliseconds()
+	return cursor
+}
+
+func encodeBatchCursor(cursor batchCursor) string {
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeBatchCursor(raw string) (batchCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return batchCursor{}, errors.New("invalid batch cursor encoding")
+	}
+	if len(data) > 1<<20 {
+		return batchCursor{}, errors.New("batch cursor is too large")
+	}
+	var cursor batchCursor
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.BatchID == "" {
+		return batchCursor{}, errors.New("invalid batch cursor")
+	}
+	if cursor.Version != 1 {
+		return batchCursor{}, errors.New("unsupported batch cursor version")
+	}
+	if cursor.Jobs == nil {
+		cursor.Jobs = make(map[string]batchJobCursor)
+	}
+	return cursor, nil
 }
 
 func (c *BatchCounts) add(state BatchJobState) {
