@@ -220,3 +220,50 @@ func TestResolveMCPRequestMethodUsesBodyAndRejectsHeaderMismatch(t *testing.T) {
 		t.Fatalf("header/body mismatch was accepted: %v", err)
 	}
 }
+
+func TestTaskMethodAuthorizationScopes(t *testing.T) {
+	oauthServer := testOAuthServer(t)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+	handler := ProtectMCP(next, oauthServer)
+
+	request := func(method, taskID, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{"taskId":"` + taskID + `"}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Mcp-Method", method)
+		req.Header.Set("Mcp-Name", taskID)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	read := mintToken(t, oauthServer, ScopeRead)
+	write := mintToken(t, oauthServer, ScopeWrite)
+	offline := mintToken(t, oauthServer, ScopeOfflineAccess)
+
+	if rec := request("tasks/get", "job_abc", read); rec.Code != http.StatusOK {
+		t.Fatalf("read token tasks/get=%d %s", rec.Code, rec.Body.String())
+	}
+	if rec := request("tasks/get", "job_abc", write); rec.Code != http.StatusOK {
+		t.Fatalf("write token tasks/get=%d %s", rec.Code, rec.Body.String())
+	}
+	if rec := request("tasks/get", "job_abc", offline); rec.Code != http.StatusForbidden || !strings.Contains(rec.Header().Get("WWW-Authenticate"), `scope="mcp:read"`) {
+		t.Fatalf("offline tasks/get=%d challenge=%q", rec.Code, rec.Header().Get("WWW-Authenticate"))
+	}
+	if rec := request("tasks/update", "job_abc", read); rec.Code != http.StatusForbidden || !strings.Contains(rec.Header().Get("WWW-Authenticate"), `scope="mcp:write"`) {
+		t.Fatalf("read tasks/update=%d challenge=%q", rec.Code, rec.Header().Get("WWW-Authenticate"))
+	}
+	if rec := request("tasks/cancel", "job_abc", write); rec.Code != http.StatusOK {
+		t.Fatalf("write tasks/cancel=%d %s", rec.Code, rec.Body.String())
+	}
+	if rec := request("tasks/cancel", "job_abc", ""); rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("WWW-Authenticate"), `scope="mcp:write"`) {
+		t.Fatalf("anonymous tasks/cancel=%d challenge=%q", rec.Code, rec.Header().Get("WWW-Authenticate"))
+	}
+}

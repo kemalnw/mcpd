@@ -127,7 +127,7 @@ func (m *Manager) Reconcile() ([]Job, error) {
 	}
 	return jobs, nil
 }
-func (m *Manager) Cancel(ctx context.Context, id string) (Job, error) {
+func (m *Manager) RequestCancel(id string) (Job, error) {
 	job, err := m.Get(id)
 	if err != nil {
 		return Job{}, err
@@ -151,10 +151,22 @@ func (m *Manager) Cancel(ctx context.Context, id string) (Job, error) {
 	if err := syscall.Kill(job.RunnerPID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return Job{}, err
 	}
+	return job, nil
+}
+
+func (m *Manager) Cancel(ctx context.Context, id string) (Job, error) {
+	job, err := m.RequestCancel(id)
+	if err != nil {
+		return Job{}, err
+	}
+	if terminal(job.State) {
+		return job, nil
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
 	defer cancel()
 	return waitForState(waitCtx, m.statePath(id), func(j Job) bool { return terminal(j.State) })
 }
+
 func (m *Manager) ReadLogTail(id string, maxBytes int) (LogTail, error) {
 	job, err := m.Get(id)
 	if err != nil {
@@ -206,7 +218,7 @@ func validJobID(id string) bool {
 	return len(id) > 4
 }
 func newJobID() (string, error) {
-	b := make([]byte, 10)
+	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}

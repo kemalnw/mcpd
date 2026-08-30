@@ -55,6 +55,38 @@ func ProtectMCP(next http.Handler, server *Server) http.Handler {
 			return
 		}
 
+		if taskScope := taskMethodScope(method); taskScope != "" {
+			if !present {
+				server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", false, "decision", "challenge", "required_scope", taskScope)
+				writeBearerChallenge(w, server.ResourceMetadataURL(), taskScope, http.StatusUnauthorized, "", "")
+				return
+			}
+			identity, verifyErr := server.VerifyBearer(raw, "")
+			if verifyErr != nil {
+				server.logger.Warn("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", true, "auth_valid", false, "decision", "challenge", "reason", verifyErr.Error())
+				writeBearerChallenge(w, server.ResourceMetadataURL(), taskScope, http.StatusUnauthorized, "invalid_token", verifyErr.Error())
+				return
+			}
+			allowed := false
+			if method == "tasks/get" {
+				_, hasRead := identity.Scopes[ScopeRead]
+				_, hasWrite := identity.Scopes[ScopeWrite]
+				allowed = hasRead || hasWrite
+			} else {
+				_, allowed = identity.Scopes[ScopeWrite]
+			}
+			if !allowed {
+				description := fmt.Sprintf("Authorization required for scope %s.", taskScope)
+				server.logger.Warn("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", true, "auth_valid", true, "decision", "challenge", "required_scope", taskScope, "reason", "insufficient_scope")
+				writeBearerChallenge(w, server.ResourceMetadataURL(), taskScope, http.StatusForbidden, "insufficient_scope", description)
+				return
+			}
+			server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", true, "auth_valid", true, "client_id", identity.ClientID, "decision", "allow", "required_scope", taskScope)
+			r = r.WithContext(context.WithValue(r.Context(), identityContextKey{}, identity))
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		if !present {
 			server.logger.Info("mcp auth decision", "jsonrpc_method", method, "method_source", requestMethod.Source, "auth_present", false, "decision", "challenge")
 			writeBearerChallenge(w, server.ResourceMetadataURL(), "", http.StatusUnauthorized, "", "")
@@ -181,6 +213,17 @@ func (w *captureWriter) Write(data []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.body.Write(data)
+}
+
+func taskMethodScope(method string) string {
+	switch method {
+	case "tasks/get":
+		return ScopeRead
+	case "tasks/update", "tasks/cancel":
+		return ScopeWrite
+	default:
+		return ""
+	}
 }
 
 // EnforceToolScopes runs after the MCP SDK has parsed the JSON-RPC request.
