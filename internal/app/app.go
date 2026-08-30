@@ -20,6 +20,7 @@ import (
 	searchmgr "github.com/kemalnw/mcpd/internal/search"
 	"github.com/kemalnw/mcpd/internal/tools"
 	"github.com/kemalnw/mcpd/internal/version"
+	workflowmgr "github.com/kemalnw/mcpd/internal/workflow"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -30,6 +31,7 @@ type App struct {
 	processes *processmgr.Manager
 	files     *fsmgr.Manager
 	searches  *searchmgr.Manager
+	workflows *workflowmgr.Store
 	oauth     *oauthsrv.Server
 	mcp       *mcp.Server
 	http      *http.Server
@@ -40,6 +42,10 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
 	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	workflowStore, err := workflowmgr.Open(cfg.Workflow.StateDir)
+	if err != nil {
 		return nil, err
 	}
 	auditStore, err := audit.Open(cfg.Audit.Enabled, cfg.Audit.Path)
@@ -173,7 +179,7 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mcpd", "version": v.Version, "mcp": cfg.Server.MCPPath, "oauth": authServer != nil})
 	})
 
-	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, searches: searches, oauth: authServer, mcp: server}
+	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, searches: searches, workflows: workflowStore, oauth: authServer, mcp: server}
 	a.http = &http.Server{
 		Addr: cfg.Server.Listen, Handler: accessLog(logger, mux),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second,

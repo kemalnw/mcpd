@@ -29,12 +29,13 @@ const (
 )
 
 type Config struct {
-	Server  ServerConfig  `toml:"server"`
-	Process ProcessConfig `toml:"process"`
-	Files   FilesConfig   `toml:"files"`
-	Search  SearchConfig  `toml:"search"`
-	Audit   AuditConfig   `toml:"audit"`
-	Auth    AuthConfig    `toml:"auth"`
+	Server   ServerConfig   `toml:"server"`
+	Process  ProcessConfig  `toml:"process"`
+	Files    FilesConfig    `toml:"files"`
+	Search   SearchConfig   `toml:"search"`
+	Audit    AuditConfig    `toml:"audit"`
+	Auth     AuthConfig     `toml:"auth"`
+	Workflow WorkflowConfig `toml:"workflow"`
 }
 
 type ServerConfig struct {
@@ -72,6 +73,10 @@ type AuditConfig struct {
 	Path    string `toml:"path"`
 }
 
+type WorkflowConfig struct {
+	StateDir string `toml:"state_dir"`
+}
+
 type AuthConfig struct {
 	Enabled                      bool   `toml:"enabled"`
 	ExternalURL                  string `toml:"external_url"`
@@ -86,11 +91,12 @@ type AuthConfig struct {
 func Default() Config {
 	stateDir := DefaultStateDir()
 	return Config{
-		Server:  ServerConfig{Listen: defaultListen, MCPPath: defaultMCPPath, ShutdownSeconds: 10},
-		Process: ProcessConfig{DefaultShell: defaultShell, DefaultWaitMS: defaultWaitTimeoutMS, InitialOutputLines: defaultInitialOutputLines, OutputBufferBytes: defaultOutputBufferBytes, MaxLineBytes: defaultMaxLineBytes, CompletedSessions: defaultCompletedSessions, BatchMaxParallel: defaultBatchMaxParallel},
-		Files:   FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
-		Search:  SearchConfig{DefaultMaxResults: 1000, RetentionSeconds: 300, InitialWaitMS: 40},
-		Audit:   AuditConfig{Enabled: true, Path: defaultAuditPath()},
+		Server:   ServerConfig{Listen: defaultListen, MCPPath: defaultMCPPath, ShutdownSeconds: 10},
+		Process:  ProcessConfig{DefaultShell: defaultShell, DefaultWaitMS: defaultWaitTimeoutMS, InitialOutputLines: defaultInitialOutputLines, OutputBufferBytes: defaultOutputBufferBytes, MaxLineBytes: defaultMaxLineBytes, CompletedSessions: defaultCompletedSessions, BatchMaxParallel: defaultBatchMaxParallel},
+		Files:    FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
+		Search:   SearchConfig{DefaultMaxResults: 1000, RetentionSeconds: 300, InitialWaitMS: 40},
+		Audit:    AuditConfig{Enabled: true, Path: defaultAuditPath()},
+		Workflow: WorkflowConfig{StateDir: filepath.Join(stateDir, "runs")},
 		Auth: AuthConfig{StateDir: filepath.Join(stateDir, "auth"), AccessTokenSeconds: 3600, RefreshTokenIdleSeconds: 30 * 24 * 60 * 60, AuthorizationCodeSeconds: 300,
 			LoginSessionSeconds: 600, ClientMetadataTimeoutSeconds: 10},
 	}
@@ -145,6 +151,9 @@ func (c Config) Validate() error {
 	}
 	if c.Server.ShutdownSeconds <= 0 {
 		return errors.New("server.shutdown_seconds must be positive")
+	}
+	if strings.TrimSpace(c.Workflow.StateDir) == "" {
+		return errors.New("workflow.state_dir is required")
 	}
 	if c.Process.DefaultShell == "" {
 		return errors.New("process.default_shell must not be empty")
