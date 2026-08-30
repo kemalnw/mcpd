@@ -17,6 +17,8 @@ COMMIT=$(git -C "$ROOT" rev-parse HEAD)
 
 sh -n "$ROOT/scripts/package-release.sh"
 sh -n "$ROOT/scripts/install.sh"
+sh -n "$ROOT/scripts/verify-live-schema.sh"
+sh -n "$ROOT/scripts/test-schema-smoke.sh"
 DIST_DIR="$TMP/dist-a" VERSION="$VERSION" COMMIT="$COMMIT" \
   SOURCE_DATE_EPOCH="$EPOCH" DATE="$DATE" "$ROOT/scripts/package-release.sh" >/dev/null
 DIST_DIR="$TMP/dist-b" VERSION="$VERSION" COMMIT="$COMMIT" \
@@ -92,5 +94,7 @@ if MCPD_VERSION="$VERSION" MCPD_RELEASE_BASE_URL="http://127.0.0.1:$PORT" \
   exit 1
 fi
 
-echo "release packaging and installer tests passed"
+"$ROOT/scripts/test-schema-smoke.sh"
+
+echo "release packaging, installer, and live schema tests passed"
 
