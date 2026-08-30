@@ -1,7 +1,7 @@
 package workflow
 
 import (
-	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -22,9 +22,14 @@ var safeHandle = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var ErrRevisionConflict = errors.New("workflow run revision conflict")
 
 type Store struct {
-	mu   sync.Mutex
-	root string
-	now  func() time.Time
+	// mu protects store-wide coordination files such as leases. Run metadata
+	// and job logs use narrower locks so unrelated workflows never serialize
+	// behind a large log read or checkpoint.
+	mu       sync.Mutex
+	runLocks *keyedRWLockTable
+	logLocks *keyedRWLockTable
+	root     string
+	now      func() time.Time
 }
 
 type CreateRequest struct {
@@ -47,7 +52,7 @@ func Open(root string) (*Store, error) {
 	if err := os.Chmod(root, 0o700); err != nil {
 		return nil, fmt.Errorf("protect workflow state directory: %w", err)
 	}
-	return &Store{root: root, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Store{root: root, now: func() time.Time { return time.Now().UTC() }, runLocks: newKeyedRWLockTable(), logLocks: newKeyedRWLockTable()}, nil
 }
 
 func (s *Store) Root() string { return s.root }
@@ -56,8 +61,6 @@ func (s *Store) Create(req CreateRequest) (Run, error) {
 	if strings.TrimSpace(req.Title) == "" {
 		return Run{}, errors.New("run title is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	id, err := newRunID()
 	if err != nil {
 		return Run{}, err
@@ -74,7 +77,12 @@ func (s *Store) Create(req CreateRequest) (Run, error) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	if err := s.writeRunLocked(run); err != nil {
+	lock, releaseLock := s.runLocks.Acquire(id)
+	lock.Lock()
+	err = s.writeRunLocked(run)
+	lock.Unlock()
+	releaseLock()
+	if err != nil {
 		return Run{}, err
 	}
 	return cloneRun(run), nil
@@ -84,14 +92,14 @@ func (s *Store) Get(id string) (Run, error) {
 	if err := validateHandle("run_id", id); err != nil {
 		return Run{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	lock, releaseLock := s.runLocks.Acquire(id)
+	defer releaseLock()
+	lock.RLock()
+	defer lock.RUnlock()
 	return s.readRunLocked(id)
 }
 
 func (s *Store) List() ([]Run, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		return nil, fmt.Errorf("list workflow state: %w", err)
@@ -101,7 +109,11 @@ func (s *Store) List() ([]Run, error) {
 		if !entry.IsDir() || !safeHandle.MatchString(entry.Name()) || !strings.HasPrefix(entry.Name(), "run_") {
 			continue
 		}
+		lock, releaseLock := s.runLocks.Acquire(entry.Name())
+		lock.RLock()
 		run, err := s.readRunLocked(entry.Name())
+		lock.RUnlock()
+		releaseLock()
 		if err != nil {
 			return nil, err
 		}
@@ -120,8 +132,10 @@ func (s *Store) Update(id string, expectedRevision uint64, mutate func(*Run) err
 	if err := validateHandle("run_id", id); err != nil {
 		return Run{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	lock, releaseLock := s.runLocks.Acquire(id)
+	defer releaseLock()
+	lock.Lock()
+	defer lock.Unlock()
 	run, err := s.readRunLocked(id)
 	if err != nil {
 		return Run{}, err
@@ -154,11 +168,18 @@ func (s *Store) AppendJobLog(runID, jobID string, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.readRunLocked(runID); err != nil {
-		return err
+	runLock, releaseRunLock := s.runLocks.Acquire(runID)
+	runLock.RLock()
+	_, runErr := s.readRunLocked(runID)
+	runLock.RUnlock()
+	releaseRunLock()
+	if runErr != nil {
+		return runErr
 	}
+	logLock, releaseLogLock := s.logLocks.Acquire(runID + "/" + jobID)
+	defer releaseLogLock()
+	logLock.Lock()
+	defer logLock.Unlock()
 	logDir := filepath.Join(s.root, runID, "logs")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return fmt.Errorf("create workflow log directory: %w", err)
@@ -192,8 +213,10 @@ func (s *Store) ReadJobLogTail(runID, jobID string, maxLines int) ([]string, err
 	if err := validateHandle("job_id", jobID); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	logLock, releaseLogLock := s.logLocks.Acquire(runID + "/" + jobID)
+	defer releaseLogLock()
+	logLock.RLock()
+	defer logLock.RUnlock()
 	path := filepath.Join(s.root, runID, "logs", jobID+".log")
 	f, err := os.Open(path)
 	if err != nil {
@@ -203,22 +226,103 @@ func (s *Store) ReadJobLogTail(runID, jobID string, maxLines int) ([]string, err
 		return nil, fmt.Errorf("open workflow job log: %w", err)
 	}
 	defer f.Close()
-	lines := make([]string, 0, maxLines)
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 64<<10)
-	scanner.Buffer(buf, 2<<20)
-	for scanner.Scan() {
-		if len(lines) == maxLines {
-			copy(lines, lines[1:])
-			lines[len(lines)-1] = scanner.Text()
-		} else {
-			lines = append(lines, scanner.Text())
-		}
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat workflow job log: %w", err)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read workflow job log: %w", err)
+	lines, err := readLastLinesAt(f, info.Size(), maxLines)
+	if err != nil {
+		return nil, fmt.Errorf("read workflow job log tail: %w", err)
 	}
 	return lines, nil
+}
+
+const (
+	workflowTailBlockBytes = 64 << 10
+	workflowTailMaxBytes   = 8 << 20
+)
+
+type keyedRWLockEntry struct {
+	lock sync.RWMutex
+	refs int
+}
+
+type keyedRWLockTable struct {
+	mu      sync.Mutex
+	entries map[string]*keyedRWLockEntry
+}
+
+func newKeyedRWLockTable() *keyedRWLockTable {
+	return &keyedRWLockTable{entries: make(map[string]*keyedRWLockEntry)}
+}
+
+// Acquire pins a keyed lock until the returned release function is called.
+// The registry deletes unused entries, so long-horizon runs/jobs do not create
+// an unbounded in-memory lock map. Call release only after unlocking the RWMutex.
+func (t *keyedRWLockTable) Acquire(key string) (*sync.RWMutex, func()) {
+	t.mu.Lock()
+	entry := t.entries[key]
+	if entry == nil {
+		entry = &keyedRWLockEntry{}
+		t.entries[key] = entry
+	}
+	entry.refs++
+	t.mu.Unlock()
+	return &entry.lock, func() {
+		t.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 && t.entries[key] == entry {
+			delete(t.entries, key)
+		}
+		t.mu.Unlock()
+	}
+}
+
+func (t *keyedRWLockTable) Len() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.entries)
+}
+
+func readLastLinesAt(r io.ReaderAt, size int64, maxLines int) ([]string, error) {
+	if size <= 0 {
+		return nil, nil
+	}
+	pos := size
+	var chunks [][]byte
+	readBytes := 0
+	newlines := 0
+	for pos > 0 && newlines <= maxLines {
+		block := int64(workflowTailBlockBytes)
+		if block > pos {
+			block = pos
+		}
+		if readBytes+int(block) > workflowTailMaxBytes {
+			return nil, fmt.Errorf("requested tail exceeds %d-byte scan budget; log contains an oversized line or too few line breaks", workflowTailMaxBytes)
+		}
+		pos -= block
+		buf := make([]byte, int(block))
+		n, err := r.ReadAt(buf, pos)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		buf = buf[:n]
+		chunks = append(chunks, buf)
+		readBytes += n
+		newlines += bytes.Count(buf, []byte{'\n'})
+	}
+	data := make([]byte, 0, readBytes)
+	for i := len(chunks) - 1; i >= 0; i-- {
+		data = append(data, chunks[i]...)
+	}
+	parts := strings.Split(string(data), "\n")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) > maxLines {
+		parts = parts[len(parts)-maxLines:]
+	}
+	return parts, nil
 }
 
 func (s *Store) readRunLocked(id string) (Run, error) {
