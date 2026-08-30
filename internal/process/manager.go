@@ -40,6 +40,7 @@ type Manager struct {
 	batchMu          sync.Mutex
 	batches          map[string]*processBatch
 	completedBatches []string
+	batchIdempotency map[string]batchIdempotencyRecord
 	globalLimiter    *weightedLimiter
 	resourceProbe    func() HostResources
 }
@@ -61,7 +62,7 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 || opts.BatchGlobalParallel <= 0 {
 		return nil, errors.New("invalid process manager limits")
 	}
-	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), opts: opts, signalGroup: signalProcessGroup, globalLimiter: newWeightedLimiter(opts.BatchGlobalParallel), resourceProbe: hostResources}, nil
+	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), batchIdempotency: make(map[string]batchIdempotencyRecord), opts: opts, signalGroup: signalProcessGroup, globalLimiter: newWeightedLimiter(opts.BatchGlobalParallel), resourceProbe: hostResources}, nil
 }
 
 func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, error) {

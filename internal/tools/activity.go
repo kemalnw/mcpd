@@ -61,7 +61,7 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = append(attrs, slog.Bool("separate_streams", v.SeparateStreams))
 		return attrs
 	case StartProcessBatchInput:
-		return []slog.Attr{slog.Int("job_count", len(v.Jobs)), slog.Int("max_parallel", v.MaxParallel), slog.Int("initial_wait_ms", v.InitialWaitMS)}
+		return []slog.Attr{slog.Int("job_count", len(v.Jobs)), slog.Int("max_parallel", v.MaxParallel), slog.Int("initial_wait_ms", v.InitialWaitMS), slog.Bool("has_idempotency_key", strings.TrimSpace(v.IdempotencyKey) != "")}
 	case ReadProcessBatchInput:
 		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS), slog.Int("length", v.Length)}
 		if v.OnlyChanged != nil {
@@ -117,7 +117,7 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = appendLogString(attrs, "range", v.Range, maxMetadataLogBytes)
 		return attrs
 	case CreateRunInput:
-		return []slog.Attr{slog.Int("success_criteria_count", len(v.SuccessCriteria)), slog.Int("objective_bytes", len(v.Objective))}
+		return []slog.Attr{slog.Int("success_criteria_count", len(v.SuccessCriteria)), slog.Int("objective_bytes", len(v.Objective)), slog.Bool("has_idempotency_key", strings.TrimSpace(v.IdempotencyKey) != "")}
 	case CheckpointRunInput:
 		attrs := []slog.Attr{slog.Uint64("expected_revision", v.ExpectedRevision), slog.Int("item_count", len(v.Items)), slog.Int("next_action_count", len(v.NextActions))}
 		return appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)

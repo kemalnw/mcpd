@@ -40,6 +40,7 @@ type CreateRunInput struct {
 	Title           string   `json:"title" jsonschema:"short durable run title"`
 	Objective       string   `json:"objective" jsonschema:"stable end goal for this engineering run"`
 	SuccessCriteria []string `json:"success_criteria" jsonschema:"verifiable conditions that define completion"`
+	IdempotencyKey  string   `json:"idempotency_key,omitempty" jsonschema:"optional retry-safety key; equivalent retries return the existing durable run"`
 }
 
 type CheckpointRunInput struct {
@@ -74,8 +75,9 @@ type RunCounts struct {
 }
 
 type RunView struct {
-	Run    workflowmgr.Run `json:"run"`
-	Counts RunCounts       `json:"counts"`
+	Run              workflowmgr.Run `json:"run"`
+	Counts           RunCounts       `json:"counts"`
+	IdempotentReplay bool            `json:"idempotent_replay,omitempty"`
 }
 
 type ListRunsOutput struct {
@@ -89,11 +91,21 @@ type RunJobLogOutput struct {
 }
 
 func (t *WorkflowTools) createRun(_ context.Context, in CreateRunInput) (RunView, error) {
-	run, err := t.store.Create(workflowmgr.CreateRequest{Title: in.Title, Objective: in.Objective, SuccessCriteria: in.SuccessCriteria})
+	req := workflowmgr.CreateRequest{Title: in.Title, Objective: in.Objective, SuccessCriteria: in.SuccessCriteria}
+	if strings.TrimSpace(in.IdempotencyKey) == "" {
+		run, err := t.store.Create(req)
+		if err != nil {
+			return RunView{}, err
+		}
+		return viewRun(run), nil
+	}
+	run, replay, err := t.store.CreateIdempotent(req, in.IdempotencyKey)
 	if err != nil {
 		return RunView{}, err
 	}
-	return viewRun(run), nil
+	view := viewRun(run)
+	view.IdempotentReplay = replay
+	return view, nil
 }
 
 func (t *WorkflowTools) checkpointRun(_ context.Context, in CheckpointRunInput) (RunView, error) {
