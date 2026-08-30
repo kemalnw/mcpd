@@ -35,8 +35,9 @@ type session struct {
 	evictedChars int64
 	lastReadAbs  int64
 
-	waitingForInput bool
-	tail            string
+	waitingForInput  bool
+	promptGeneration uint64
+	tail             string
 
 	done      chan struct{}
 	doneOnce  sync.Once
@@ -75,13 +76,30 @@ func (s *session) feed(data []byte) {
 	if len(s.tail) > 4096 {
 		s.tail = s.tail[len(s.tail)-4096:]
 	}
-	s.waitingForInput = looksLikePrompt(s.tail)
-	if s.waitingForInput && s.state == StateRunning {
-		s.state = StateWaiting
-	} else if !s.waitingForInput && s.state == StateWaiting {
+	s.promptGeneration++
+	s.waitingForInput = false
+	if s.state == StateWaiting {
 		s.state = StateRunning
 	}
+	promptCandidate := looksLikePrompt(s.tail)
+	generation := s.promptGeneration
 	s.enforceLimitLocked()
+	s.signalLocked()
+	if promptCandidate {
+		time.AfterFunc(promptStabilityDelay, func() { s.confirmPrompt(generation) })
+	}
+}
+
+func (s *session) confirmPrompt(generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.promptGeneration || s.exitCode != nil || !looksLikePrompt(s.tail) {
+		return
+	}
+	s.waitingForInput = true
+	if s.state == StateRunning {
+		s.state = StateWaiting
+	}
 	s.signalLocked()
 }
 
@@ -135,6 +153,8 @@ func (s *session) markExited(err error) {
 
 func (s *session) markStopping() {
 	s.mu.Lock()
+	s.promptGeneration++
+	s.waitingForInput = false
 	if s.state == StateRunning || s.state == StateWaiting {
 		s.state = StateStopping
 		s.signalLocked()
@@ -148,6 +168,7 @@ func (s *session) write(input string) error {
 		s.mu.Unlock()
 		return ErrProcessExited
 	}
+	s.promptGeneration++
 	s.waitingForInput = false
 	if s.state == StateWaiting {
 		s.state = StateRunning
