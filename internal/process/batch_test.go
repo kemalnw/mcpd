@@ -189,3 +189,68 @@ func waitForBatchState(t *testing.T, m *Manager, batchID string, predicate func(
 	t.Fatalf("batch %s did not reach expected state: %+v", batchID, last)
 	return BatchResult{}
 }
+
+func TestBatchDAGSchedulesOnlyReadyJobs(t *testing.T) {
+	m := batchTestManager(t, 3)
+	root := t.TempDir()
+	release := filepath.Join(root, "release")
+	wait := "while [ ! -f release ]; do sleep 0.01; done"
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{MaxParallel: 3, Jobs: []BatchJobRequest{
+		{ID: "a", Command: wait, CWD: root, PTY: PTYNever},
+		{ID: "b", Command: wait, CWD: root, PTY: PTYNever},
+		{ID: "c", Command: "printf 'after\\n'", CWD: root, PTY: PTYNever, DependsOn: []string{"a", "b"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.Counts.Running == 2 && r.Counts.Queued == 1 })
+	for _, job := range state.Jobs {
+		if job.ID == "c" && job.PID != 0 {
+			t.Fatalf("dependent job started early: %+v", job)
+		}
+	}
+	if err := os.WriteFile(release, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	final := waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	if final.Counts.Completed != 3 || final.Counts.Blocked != 0 {
+		t.Fatalf("DAG final = %+v", final)
+	}
+}
+
+func TestBatchDAGFailureBlocksOnlyDependents(t *testing.T) {
+	m := batchTestManager(t, 3)
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{Jobs: []BatchJobRequest{
+		{ID: "fails", Command: "exit 2", PTY: PTYNever},
+		{ID: "blocked", Command: "printf never", PTY: PTYNever, DependsOn: []string{"fails"}},
+		{ID: "independent", Command: "true", PTY: PTYNever},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	if final.Counts.Failed != 1 || final.Counts.Blocked != 1 || final.Counts.Completed != 1 {
+		t.Fatalf("failure propagation = %+v", final)
+	}
+	for _, job := range final.Jobs {
+		if job.ID == "blocked" && (job.State != BatchJobBlocked || job.PID != 0 || !strings.Contains(job.Error, "fails")) {
+			t.Fatalf("blocked job = %+v", job)
+		}
+	}
+}
+
+func TestBatchDAGRejectsCyclesAndUnknownDependenciesBeforeStart(t *testing.T) {
+	m := batchTestManager(t, 2)
+	bad := []BatchStartRequest{
+		{Jobs: []BatchJobRequest{{ID: "a", Command: "true", DependsOn: []string{"missing"}}, {ID: "b", Command: "true"}}},
+		{Jobs: []BatchJobRequest{{ID: "a", Command: "true", DependsOn: []string{"b"}}, {ID: "b", Command: "true", DependsOn: []string{"a"}}}},
+	}
+	for i, req := range bad {
+		if _, err := m.StartBatch(context.Background(), req); err == nil {
+			t.Fatalf("bad DAG %d accepted", i)
+		}
+	}
+	if len(m.ListSessions()) != 0 {
+		t.Fatal("invalid DAG started processes")
+	}
+}

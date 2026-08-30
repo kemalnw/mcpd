@@ -33,6 +33,7 @@ const (
 	BatchJobFailed      BatchJobState = "failed"
 	BatchJobCanceled    BatchJobState = "canceled"
 	BatchJobStartFailed BatchJobState = "start_failed"
+	BatchJobBlocked     BatchJobState = "blocked"
 )
 
 type BatchJobRequest struct {
@@ -42,6 +43,7 @@ type BatchJobRequest struct {
 	Shell           string
 	PTY             PTYMode
 	SeparateStreams bool
+	DependsOn       []string
 }
 
 type BatchStartRequest struct {
@@ -82,6 +84,7 @@ type BatchCounts struct {
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
 	Canceled  int `json:"canceled"`
+	Blocked   int `json:"blocked"`
 }
 
 type BatchResult struct {
@@ -162,6 +165,9 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 			return BatchResult{}, fmt.Errorf("batch job %q requests PTY=always; interactive PTY jobs must use start_process", jobReq.ID)
 		}
 		jobs = append(jobs, &batchJob{req: jobReq, state: BatchJobQueued})
+	}
+	if err := validateBatchDAG(jobs); err != nil {
+		return BatchResult{}, err
 	}
 	id, err := newBatchID()
 	if err != nil {
@@ -248,30 +254,67 @@ func (m *Manager) CancelBatch(batchID string) (BatchCancelResult, error) {
 }
 
 func (m *Manager) runBatch(b *processBatch) {
-	sem := make(chan struct{}, b.maxParallel)
-	done := make(chan struct{}, len(b.jobs))
-	for _, job := range b.jobs {
-		sem <- struct{}{}
+	done := make(chan *batchJob, len(b.jobs))
+	running := 0
+	for {
 		m.batchMu.Lock()
-		if b.canceled || job.state == BatchJobCanceled {
-			if job.state != BatchJobCanceled {
-				job.state = BatchJobCanceled
-				job.changeGeneration++
-				m.bumpBatchLocked(b)
+		if b.canceled {
+			for _, job := range b.jobs {
+				if job.state == BatchJobQueued {
+					job.state = BatchJobCanceled
+					job.changeGeneration++
+				}
 			}
-			m.batchMu.Unlock()
-			<-sem
-			done <- struct{}{}
+			m.bumpBatchLocked(b)
+		} else {
+			// Resolve permanently blocked dependents before filling available slots.
+			for _, job := range b.jobs {
+				if job.state != BatchJobQueued {
+					continue
+				}
+				if reason := batchDependencyFailure(b, job); reason != "" {
+					job.state = BatchJobBlocked
+					job.err = reason
+					job.changeGeneration++
+					m.bumpBatchLocked(b)
+				}
+			}
+			for running < b.maxParallel {
+				var ready *batchJob
+				for _, job := range b.jobs {
+					if job.state == BatchJobQueued && batchDependenciesComplete(b, job) {
+						ready = job
+						break
+					}
+				}
+				if ready == nil {
+					break
+				}
+				// Reserve synchronously so the scheduler cannot launch the same job
+				// twice while process creation is still in progress.
+				ready.state = BatchJobRunning
+				ready.changeGeneration++
+				running++
+				m.bumpBatchLocked(b)
+				go func(job *batchJob) {
+					m.runBatchJob(b, job)
+					done <- job
+				}(ready)
+			}
+		}
+		terminal := batchTerminalCount(b)
+		m.batchMu.Unlock()
+
+		if terminal == len(b.jobs) && running == 0 {
+			break
+		}
+		if running > 0 {
+			<-done
+			running--
 			continue
 		}
-		m.batchMu.Unlock()
-		go func(job *batchJob) {
-			defer func() { <-sem; done <- struct{}{} }()
-			m.runBatchJob(b, job)
-		}(job)
-	}
-	for range b.jobs {
-		<-done
+		// A valid acyclic graph with no live jobs always has either a ready root
+		// or a newly blockable descendant; immediately re-evaluate those states.
 	}
 	m.batchMu.Lock()
 	if !b.canceled {
@@ -280,6 +323,93 @@ func (m *Manager) runBatch(b *processBatch) {
 	m.bumpBatchLocked(b)
 	m.batchMu.Unlock()
 	m.markBatchCompleted(b.id)
+}
+
+func batchTerminalCount(b *processBatch) int {
+	count := 0
+	for _, job := range b.jobs {
+		switch job.state {
+		case BatchJobCompleted, BatchJobFailed, BatchJobStartFailed, BatchJobCanceled, BatchJobBlocked:
+			count++
+		}
+	}
+	return count
+}
+
+func batchDependenciesComplete(b *processBatch, job *batchJob) bool {
+	for _, dependency := range job.req.DependsOn {
+		dep := b.byID[dependency]
+		if dep == nil || dep.state != BatchJobCompleted {
+			return false
+		}
+	}
+	return true
+}
+
+func batchDependencyFailure(b *processBatch, job *batchJob) string {
+	for _, dependency := range job.req.DependsOn {
+		dep := b.byID[dependency]
+		if dep == nil {
+			return fmt.Sprintf("unknown dependency %q", dependency)
+		}
+		switch dep.state {
+		case BatchJobFailed, BatchJobStartFailed, BatchJobCanceled, BatchJobBlocked:
+			return fmt.Sprintf("dependency %q ended in state %s", dependency, dep.state)
+		}
+	}
+	return ""
+}
+
+func validateBatchDAG(jobs []*batchJob) error {
+	byID := make(map[string]*batchJob, len(jobs))
+	for _, job := range jobs {
+		byID[job.req.ID] = job
+	}
+	for _, job := range jobs {
+		seenDeps := make(map[string]struct{}, len(job.req.DependsOn))
+		for _, dependency := range job.req.DependsOn {
+			dependency = strings.TrimSpace(dependency)
+			if dependency == "" {
+				return fmt.Errorf("batch job %q has an empty dependency", job.req.ID)
+			}
+			if dependency == job.req.ID {
+				return fmt.Errorf("batch job %q depends on itself", job.req.ID)
+			}
+			if _, ok := byID[dependency]; !ok {
+				return fmt.Errorf("batch job %q has unknown dependency %q", job.req.ID, dependency)
+			}
+			if _, ok := seenDeps[dependency]; ok {
+				return fmt.Errorf("batch job %q repeats dependency %q", job.req.ID, dependency)
+			}
+			seenDeps[dependency] = struct{}{}
+		}
+	}
+	visiting := make(map[string]bool, len(jobs))
+	visited := make(map[string]bool, len(jobs))
+	var visit func(string) error
+	visit = func(id string) error {
+		if visiting[id] {
+			return fmt.Errorf("batch dependency cycle includes %q", id)
+		}
+		if visited[id] {
+			return nil
+		}
+		visiting[id] = true
+		for _, dependency := range byID[id].req.DependsOn {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		visiting[id] = false
+		visited[id] = true
+		return nil
+	}
+	for _, job := range jobs {
+		if err := visit(job.req.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
@@ -300,7 +430,6 @@ func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
 	m.batchMu.Lock()
 	job.session = s
 	job.pid = s.pid
-	job.state = BatchJobRunning
 	job.changeGeneration++
 	m.bumpBatchLocked(b)
 	m.batchMu.Unlock()
@@ -437,6 +566,8 @@ func (c *BatchCounts) add(state BatchJobState) {
 		c.Failed++
 	case BatchJobCanceled:
 		c.Canceled++
+	case BatchJobBlocked:
+		c.Blocked++
 	}
 }
 
