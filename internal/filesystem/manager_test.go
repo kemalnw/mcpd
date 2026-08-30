@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -405,5 +406,151 @@ func TestEditManyPreservesSymlinkAndHardLinkSemantics(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(hardB); string(data) != "RED BLUE\n" {
 		t.Fatalf("hard-link peer = %q", data)
+	}
+}
+
+func TestListDirectoryPruneMetadataKeepsUsefulDotDirs(t *testing.T) {
+	m := testManager(t)
+	root := t.TempDir()
+	write := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(root, ".git", "objects", "aa", "blob"))
+	write(filepath.Join(root, "node_modules", "pkg", "index.js"))
+	write(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	write(filepath.Join(root, "src", "main.go"))
+
+	got, err := m.ListDirectoryWithOptions(context.Background(), DirectoryRequest{Path: root, Depth: 4, MaxEntries: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := make([]string, 0, len(got.Entries))
+	for _, entry := range got.Entries {
+		joined = append(joined, filepath.ToSlash(entry.Path))
+	}
+	text := strings.Join(joined, "\n")
+	if strings.Contains(text, ".git/objects/aa") || strings.Contains(text, "node_modules/pkg") {
+		t.Fatalf("pruned trees were traversed: entries=%v pruned=%v", joined, got.Pruned)
+	}
+	if !strings.Contains(text, ".github/workflows/ci.yml") || !strings.Contains(text, "src/main.go") {
+		t.Fatalf("useful project content was pruned: %v", joined)
+	}
+	pruned := strings.Join(got.Pruned, "\n")
+	if !strings.Contains(pruned, ".git/objects") || !strings.Contains(pruned, "node_modules") {
+		t.Fatalf("missing prune metadata: %+v", got)
+	}
+}
+
+func TestListDirectoryPruneOverrideAndGlobalCap(t *testing.T) {
+	m, err := NewManager(Options{DefaultReadLines: 3, MaxLineBytes: 1 << 20, NestedEntryLimit: 100, MaxRemoteBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for i := 0; i < 10; i++ {
+		path := filepath.Join(root, "node_modules", "pkg", fmt.Sprintf("%02d.js", i))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := m.ListDirectoryWithOptions(context.Background(), DirectoryRequest{Path: root, Depth: 4, IncludePruned: true, MaxEntries: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Truncated || len(got.Entries) != 5 || got.MaxEntries != 5 {
+		t.Fatalf("global cap not enforced: %+v", got)
+	}
+	if len(got.Pruned) != 0 {
+		t.Fatalf("includePruned still reported pruned paths: %+v", got.Pruned)
+	}
+}
+
+func TestListDirectoryPrunesDeveloperNoiseByDefault(t *testing.T) {
+	m := testManager(t)
+	root := t.TempDir()
+	for _, path := range []string{
+		filepath.Join(root, ".git", "objects", "aa", "blob"),
+		filepath.Join(root, "node_modules", "pkg", "index.js"),
+		filepath.Join(root, ".github", "workflows", "ci.yml"),
+		filepath.Join(root, "src", "main.go"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := m.ListDirectoryWithOptions(context.Background(), DirectoryRequest{Path: root, Depth: 4, MaxEntries: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, entry := range result.Entries {
+		joined += filepath.ToSlash(entry.Path) + "\n"
+	}
+	if strings.Contains(joined, ".git/objects/aa") || strings.Contains(joined, "node_modules/pkg") {
+		t.Fatalf("noise directory was traversed: %s", joined)
+	}
+	if !strings.Contains(joined, ".github/workflows") || !strings.Contains(joined, "src/main.go") {
+		t.Fatalf("useful repository content was hidden: %s", joined)
+	}
+	if len(result.Pruned) < 2 {
+		t.Fatalf("expected prune metadata, got %+v", result)
+	}
+}
+
+func TestListDirectoryIncludePrunedOverridesDefault(t *testing.T) {
+	m := testManager(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "node_modules", "pkg", "index.js")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := m.ListDirectoryWithOptions(context.Background(), DirectoryRequest{Path: root, Depth: 4, MaxEntries: 100, IncludePruned: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range result.Entries {
+		if filepath.ToSlash(entry.Path) == "node_modules/pkg/index.js" {
+			found = true
+		}
+	}
+	if !found || len(result.Pruned) != 0 {
+		t.Fatalf("includePruned did not traverse dependency tree: %+v", result)
+	}
+}
+
+func TestListDirectoryGlobalCap(t *testing.T) {
+	m := testManager(t)
+	root := t.TempDir()
+	for i := 0; i < 20; i++ {
+		path := filepath.Join(root, fmt.Sprintf("dir-%02d", i), "file.txt")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := m.ListDirectoryWithOptions(context.Background(), DirectoryRequest{Path: root, Depth: 3, MaxEntries: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 7 || !result.Truncated || result.MaxEntries != 7 {
+		t.Fatalf("global cap not enforced: %+v", result)
 	}
 }
