@@ -14,6 +14,8 @@ initial_output_lines = 200
 output_buffer_bytes = 52428800
 max_line_bytes = 1048576
 completed_sessions = 100
+# Hard ceiling for concurrently running jobs inside one process batch.
+batch_max_parallel = 4
 
 [files]
 default_read_lines = 1000

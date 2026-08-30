@@ -12,6 +12,9 @@ fields such as `origin`.
 | Tool | Status |
 | --- | --- |
 | `start_process` | implemented |
+| `start_process_batch` | implemented |
+| `read_process_batch` | implemented |
+| `cancel_process_batch` | implemented |
 | `read_process_output` | implemented |
 | `interact_with_process` | implemented |
 | `resize_process_pty` | implemented |
@@ -52,7 +55,7 @@ fields such as `origin`.
 | `get_usage_stats` | planned |
 | `get_recent_tool_calls` | planned |
 
-Total target: **25 MCP tools**.
+Total target: **28 MCP tools**.
 
 Desktop Commander-specific feedback, prompts, UI telemetry, and `node:local`
 virtual-session behavior are intentionally outside the compatibility target.
@@ -104,6 +107,14 @@ Semantics:
 - Initial process output is capped by `process.initial_output_lines` (default 200) even when more output is retained server-side.
 - The result includes `read_from`, `read_count`, `total_lines`, `remaining`, and `evicted_lines` so callers can detect truncated initial output and continue with `read_process_output`.
 - `separate_streams=true` is only meaningful for non-PTY commands. Those sessions return `streams` records with `stdout`/`stderr` identity instead of duplicating the same source text in merged `output`/`lines`. PTYs remain a single terminal stream by definition.
+
+### `start_process_batch`, `read_process_batch`, `cancel_process_batch`
+
+Use batches for two or more independent, non-interactive commands. `start_process_batch` accepts stable per-batch job IDs plus the same command/cwd/shell and non-interactive output options as `start_process`. `max_parallel` is capped by `process.batch_max_parallel` (default 4); excess jobs remain queued until a slot is available. `PTY=always` is rejected because interactive terminal control remains an individual-session concern.
+
+`read_process_batch` defaults to changed-only polling. It waits until any batch job changes state/output (or timeout), then returns only changed jobs and bounded output deltas. Batch output cursors are independent from `read_process_output`, so a caller can later inspect a job PID from its beginning without batch polling having consumed the per-process cursor.
+
+A job failure does not cancel independent siblings. `cancel_process_batch` marks queued jobs canceled and safely terminates running MCPD-managed process groups. Batch state remains `canceled`; completed jobs are not rewritten as failures.
 
 ### `read_process_output`
 

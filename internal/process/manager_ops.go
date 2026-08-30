@@ -271,6 +271,7 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 }
 
 func (m *Manager) Close() error {
+	m.cancelAllBatches()
 	m.mu.RLock()
 	pids := make([]int, 0, len(m.sessions))
 	for pid, s := range m.sessions {

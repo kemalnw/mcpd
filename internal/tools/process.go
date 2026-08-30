@@ -20,6 +20,9 @@ type ProcessTools struct {
 func RegisterProcess(server *mcp.Server, manager *processmgr.Manager, auditStore *audit.Store) {
 	t := &ProcessTools{manager: manager, audit: auditStore}
 	mcp.AddTool(server, tool("start_process", "Run a shell command", "Use this for shell commands, builds, tests, package managers, Git, service inspection, and other terminal work. For repository-scoped work, pass cwd instead of embedding `cd <path> &&`. For non-PTY commands, set separate_streams=true only when stdout/stderr identity matters; default merged output remains more compact. The call returns on exit, prompt, or timeout without killing a running process. Continue the same PID with read_process_output or interact_with_process.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process", t.start))
+	mcp.AddTool(server, tool("start_process_batch", "Run independent commands in parallel", "Use this for two or more independent non-interactive shell/build/test/Git/package-manager commands. MCPD schedules jobs up to max_parallel and returns one batch_id. Prefer this over many separate start_process calls when the jobs do not depend on each other. PTY=always is rejected; interactive work stays on start_process. Continue with read_process_batch and use only_changed=true to avoid repeated output.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process_batch", t.startBatch))
+	mcp.AddTool(server, tool("read_process_batch", "Read changed batch jobs", "Use this only with a batch_id from start_process_batch. By default use only_changed=true: the call waits until any job changes and returns only changed jobs with bounded output deltas. Batch output cursors are independent from per-PID read_process_output cursors.", toolHints{readOnly: true}), audited(auditStore, "read_process_batch", t.readBatch))
+	mcp.AddTool(server, tool("cancel_process_batch", "Cancel a process batch", "Use this to cancel queued/running jobs in a batch created by start_process_batch. Running MCPD-managed process groups are terminated safely; completed jobs remain completed.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "cancel_process_batch", t.cancelBatch))
 	mcp.AddTool(server, tool("read_process_output", "Read command output", "Use this only for a PID returned by start_process. offset=0 waits for unread output and advances the cursor; it also observes same-line/partial updates through generation + latest_line even when no newline was emitted. Positive offsets are absolute retained ranges and negative offsets read from the tail without moving the cursor. Sessions started with separate_streams return stream-tagged records instead of duplicate merged lines.", toolHints{readOnly: true}), audited(auditStore, "read_process_output", t.readOutput))
 	mcp.AddTool(server, tool("interact_with_process", "Send input to a command", "Use this only for an interactive PID returned by start_process. By default MCPD appends a newline when absent; set raw_input=true for exact bytes/control-oriented input where no newline should be added. wait_for_prompt controls whether the call waits for another prompt or process completion.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "interact_with_process", t.interact))
 	mcp.AddTool(server, tool("resize_process_pty", "Resize a command PTY", "Use this only for a running PTY session returned by start_process when the terminal dimensions need to change, for example before driving a TUI. rows and cols must be positive terminal cell counts. Non-PTY or exited sessions are rejected.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "resize_process_pty", t.resizePTY))
@@ -37,6 +40,32 @@ type StartProcessInput struct {
 	VerboseTiming   bool   `json:"verbose_timing,omitempty" jsonschema:"accepted for Desktop Commander compatibility; timing fields are always returned in structured output"`
 	PTY             string `json:"pty,omitempty" jsonschema:"mcpd extension: PTY mode auto, always, or never; defaults to auto"`
 	SeparateStreams bool   `json:"separate_streams,omitempty" jsonschema:"for non-PTY commands, return stdout/stderr as stream-tagged records instead of merged lines"`
+}
+
+type BatchProcessJobInput struct {
+	ID              string `json:"id" jsonschema:"stable caller-chosen job identifier unique within the batch"`
+	Command         string `json:"command" jsonschema:"shell command to execute"`
+	CWD             string `json:"cwd,omitempty" jsonschema:"optional working directory"`
+	Shell           string `json:"shell,omitempty" jsonschema:"optional shell executable"`
+	PTY             string `json:"pty,omitempty" jsonschema:"PTY mode auto or never; interactive PTY=always jobs must use start_process"`
+	SeparateStreams bool   `json:"separate_streams,omitempty" jsonschema:"for non-PTY jobs, preserve stdout/stderr identity"`
+}
+
+type StartProcessBatchInput struct {
+	Jobs          []BatchProcessJobInput `json:"jobs" jsonschema:"two or more independent non-interactive jobs to schedule"`
+	MaxParallel   int                    `json:"max_parallel,omitempty" jsonschema:"requested concurrency; capped by process.batch_max_parallel"`
+	InitialWaitMS int                    `json:"initial_wait_ms,omitempty" jsonschema:"milliseconds to wait for the first batch state/output change; defaults to 40"`
+}
+
+type ReadProcessBatchInput struct {
+	BatchID     string `json:"batch_id" jsonschema:"batch identifier returned by start_process_batch"`
+	TimeoutMS   int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for a batch change when only_changed is true; defaults to 5000"`
+	Length      int    `json:"length,omitempty" jsonschema:"maximum new output lines per changed job; defaults to 100"`
+	OnlyChanged *bool  `json:"only_changed,omitempty" jsonschema:"return only jobs changed since the previous batch read; defaults to true"`
+}
+
+type BatchIDInput struct {
+	BatchID string `json:"batch_id" jsonschema:"batch identifier returned by start_process_batch"`
 }
 
 type ReadProcessOutputInput struct {
@@ -84,6 +113,26 @@ type ProcessesOutput struct {
 
 func (t *ProcessTools) start(ctx context.Context, in StartProcessInput) (processmgr.StartResult, error) {
 	return t.manager.Start(ctx, processmgr.StartRequest{Command: in.Command, CWD: in.CWD, Shell: in.Shell, TimeoutMS: in.TimeoutMS, PTY: processmgr.PTYMode(in.PTY), SeparateStreams: in.SeparateStreams})
+}
+
+func (t *ProcessTools) startBatch(ctx context.Context, in StartProcessBatchInput) (processmgr.BatchResult, error) {
+	jobs := make([]processmgr.BatchJobRequest, 0, len(in.Jobs))
+	for _, job := range in.Jobs {
+		jobs = append(jobs, processmgr.BatchJobRequest{ID: job.ID, Command: job.Command, CWD: job.CWD, Shell: job.Shell, PTY: processmgr.PTYMode(job.PTY), SeparateStreams: job.SeparateStreams})
+	}
+	return t.manager.StartBatch(ctx, processmgr.BatchStartRequest{Jobs: jobs, MaxParallel: in.MaxParallel, InitialWaitMS: in.InitialWaitMS})
+}
+
+func (t *ProcessTools) readBatch(ctx context.Context, in ReadProcessBatchInput) (processmgr.BatchResult, error) {
+	onlyChanged := true
+	if in.OnlyChanged != nil {
+		onlyChanged = *in.OnlyChanged
+	}
+	return t.manager.ReadBatch(ctx, processmgr.BatchReadRequest{BatchID: in.BatchID, TimeoutMS: in.TimeoutMS, Length: in.Length, OnlyChanged: onlyChanged})
+}
+
+func (t *ProcessTools) cancelBatch(_ context.Context, in BatchIDInput) (processmgr.BatchCancelResult, error) {
+	return t.manager.CancelBatch(in.BatchID)
 }
 
 func (t *ProcessTools) readOutput(ctx context.Context, in ReadProcessOutputInput) (processmgr.OutputResult, error) {
