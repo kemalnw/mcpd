@@ -1,0 +1,3 @@
+display_name: MCPD Parallel Engineering
+short_description: Run large engineering work safely in parallel with MCPD
+default_prompt: Use MCPD to execute this engineering task with maximum safe parallelism, durable checkpoints when available, isolated worktrees, and full quality gates.

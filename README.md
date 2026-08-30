@@ -117,6 +117,26 @@ the main filename pattern.
 
 The target tool catalog is documented in [`docs/tool-contracts.md`](docs/tool-contracts.md).
 
+## Bundled Agent Skills
+
+MCPD ships reusable Agent Skills under [`skills/`](skills/) so the orchestration playbook can be versioned with the server instead of being re-explained in every chat. The primary skill, [`mcpd-parallel-engineering`](skills/mcpd-parallel-engineering/SKILL.md), covers dependency-DAG planning, isolated Git worktrees, safe parallel execution, CI gates, failure recovery, long-run checkpoints, and release verification.
+
+Install it from a clone into the default Codex skills directory:
+
+```bash
+make skill-install
+```
+
+Or copy it to an explicit compatible skills directory:
+
+```bash
+./scripts/install-skill.sh mcpd-parallel-engineering /path/to/skills
+```
+
+The installer refuses to overwrite an existing skill by default. Set `MCPD_SKILL_FORCE=1` only when intentional replacement is desired. Because the skill is a normal `SKILL.md` directory, it can also be copied or pulled directly from this repository. Validate all bundled skills with `make skills-check`.
+
+See [`docs/parallel-engineering-roadmap.md`](docs/parallel-engineering-roadmap.md) for the durable parallel-execution roadmap.
+
 ## Development
 
 Requirements:
