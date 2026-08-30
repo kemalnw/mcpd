@@ -243,18 +243,14 @@ permissions, file/directory flags, detected file type, and for text files
   "old_string": "string, text mode",
   "new_string": "string, text mode; empty is valid",
   "expected_replacements": "integer, optional; default 1",
+  "edits": [{"old_string": "string", "new_string": "string", "expected_replacements": "integer, optional; default 1"}],
   "range": "string, structured mode",
   "content": "any, structured mode",
   "options": "object, optional"
 }
 ```
 
-Text mode requires the exact occurrence count before modifying the file. When
-no exact match exists, `mcpd` computes the closest candidate and returns a
-character diff. Similarity of 70% or greater is reported as a correction hint,
-but fuzzy text is never modified automatically. Atomic replacement preserves
-symlink targets, and hard-linked files are edited in place so inode sharing is
-not silently broken.
+Single text mode requires the exact occurrence count before modifying the file. Multi-hunk `edits` mode validates every hunk and every original byte range before writing once; ambiguous/missing counts or overlapping hunks reject the entire batch and leave the file unchanged. Per-hunk validation results are returned in `edits`. When no exact match exists, `mcpd` computes the closest candidate and returns a character diff. Similarity of 70% or greater is reported as a correction hint, but fuzzy text is never modified automatically. Replacement preserves symlink targets, and hard-linked files are edited in place so inode sharing is not silently broken.
 
 Planned structured edit handlers: Excel range replacement and DOCX XML
 replacement.

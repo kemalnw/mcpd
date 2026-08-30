@@ -286,3 +286,124 @@ func TestNewManagerRejectsNegativeLimits(t *testing.T) {
 		t.Fatal("NewManager accepted a negative read limit")
 	}
 }
+
+func TestEditManyAppliesAllHunksAtomically(t *testing.T) {
+	m := testManager(t)
+	path := filepath.Join(t.TempDir(), "multi.txt")
+	if err := os.WriteFile(path, []byte("alpha beta alpha\ngamma\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result, err := m.Edit(context.Background(), EditRequest{Path: path, Edits: []TextEdit{
+		{OldString: "alpha", NewString: "A", ExpectedReplacements: 2},
+		{OldString: "gamma", NewString: "G"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Applied || result.Replacements != 3 || len(result.Edits) != 2 || !result.Edits[0].Applied || !result.Edits[1].Applied {
+		t.Fatalf("unexpected multi-edit result: %+v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "A beta A\nG\n" {
+		t.Fatalf("multi-edit content = %q", data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %o, want 640", info.Mode().Perm())
+	}
+}
+
+func TestEditManyValidationFailureRollsBack(t *testing.T) {
+	m := testManager(t)
+	path := filepath.Join(t.TempDir(), "rollback.txt")
+	original := "alpha\nbeta\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := m.Edit(context.Background(), EditRequest{Path: path, Edits: []TextEdit{
+		{OldString: "alpha", NewString: "A"},
+		{OldString: "missing", NewString: "M"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || len(result.Edits) != 2 || result.Edits[1].ClosestMatch == "" {
+		t.Fatalf("unexpected rollback result: %+v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Fatalf("failed batch modified file: %q", data)
+	}
+}
+
+func TestEditManyRejectsOverlappingHunks(t *testing.T) {
+	m := testManager(t)
+	path := filepath.Join(t.TempDir(), "overlap.txt")
+	original := "abcdef\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := m.Edit(context.Background(), EditRequest{Path: path, Edits: []TextEdit{
+		{OldString: "abcd", NewString: "X"},
+		{OldString: "cdef", NewString: "Y"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || !strings.Contains(result.Message, "overlap") {
+		t.Fatalf("overlap was not rejected: %+v", result)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != original {
+		t.Fatalf("overlap modified file: %q", data)
+	}
+}
+
+func TestEditManyPreservesSymlinkAndHardLinkSemantics(t *testing.T) {
+	m := testManager(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "target.txt")
+	link := filepath.Join(root, "link.txt")
+	if err := os.WriteFile(target, []byte("one two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Edit(context.Background(), EditRequest{Path: link, Edits: []TextEdit{{OldString: "one", NewString: "ONE"}, {OldString: "two", NewString: "TWO"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink was not preserved: info=%v err=%v", info, err)
+	}
+	if data, _ := os.ReadFile(target); string(data) != "ONE TWO\n" {
+		t.Fatalf("symlink target = %q", data)
+	}
+
+	hardA := filepath.Join(root, "hard-a.txt")
+	hardB := filepath.Join(root, "hard-b.txt")
+	if err := os.WriteFile(hardA, []byte("red blue\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(hardA, hardB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Edit(context.Background(), EditRequest{Path: hardA, Edits: []TextEdit{{OldString: "red", NewString: "RED"}, {OldString: "blue", NewString: "BLUE"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(hardB); string(data) != "RED BLUE\n" {
+		t.Fatalf("hard-link peer = %q", data)
+	}
+}
