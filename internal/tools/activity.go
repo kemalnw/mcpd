@@ -51,11 +51,14 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = appendLogString(attrs, "cwd", v.CWD, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "pty_mode", v.PTY, maxMetadataLogBytes)
+		attrs = append(attrs, slog.Bool("separate_streams", v.SeparateStreams))
 		return attrs
 	case ReadProcessOutputInput:
 		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("timeout_ms", v.TimeoutMS), slog.Int("offset", v.Offset), slog.Int("length", v.Length)}
 	case InteractWithProcessInput:
-		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("input_bytes", len(v.Input)), slog.Int("input_lines", lineCount(v.Input)), slog.Int("timeout_ms", v.TimeoutMS)}
+		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("input_bytes", len(v.Input)), slog.Int("input_lines", lineCount(v.Input)), slog.Int("timeout_ms", v.TimeoutMS), slog.Bool("raw_input", v.RawInput)}
+	case ResizePTYInput:
+		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("rows", v.Rows), slog.Int("cols", v.Cols)}
 	case PIDInput:
 		return []slog.Attr{slog.Int("pid", v.PID)}
 	case ReadFileInput:
@@ -132,6 +135,8 @@ func toolOutputAttrs(out any) []slog.Attr {
 	case processmgr.InteractResult:
 		attrs := []slog.Attr{slog.Int("pid", v.PID), slog.String("process_state", string(v.State)), slog.Int64("runtime_ms", v.RuntimeMS), slog.Bool("waiting_for_input", v.WaitingForInput)}
 		return appendExitCode(attrs, v.ExitCode)
+	case processmgr.PTYSizeResult:
+		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("rows", v.Rows), slog.Int("cols", v.Cols)}
 	case TerminateOutput:
 		attrs := []slog.Attr{slog.Int("pid", v.PID), slog.Bool("terminated", v.Terminated)}
 		return appendLogString(attrs, "signal", v.Signal, maxMetadataLogBytes)

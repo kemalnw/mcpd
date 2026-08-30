@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"syscall"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 const (
@@ -42,7 +44,7 @@ func (m *Manager) waitForUnreadOutput(ctx context.Context, s *session, timeout t
 	for {
 		s.mu.Lock()
 		total := s.totalLinesLocked()
-		unread := total > s.lastReadAbs
+		unread := total > s.lastReadAbs || s.outputGeneration > s.lastReadGeneration
 		exited := s.exitCode != nil
 		ch := s.notify
 		s.mu.Unlock()
@@ -64,8 +66,10 @@ func readPaginated(s *session, offset, length int) OutputResult {
 	defer s.mu.Unlock()
 
 	lines := s.snapshotLinesLocked()
+	streamLines := s.snapshotStreamsLocked()
 	retainedStart := s.evictedLines
 	total := retainedStart + int64(len(lines))
+	generationChanged := s.outputGeneration > s.lastReadGeneration
 	var start int64
 	switch {
 	case offset == 0:
@@ -89,19 +93,31 @@ func readPaginated(s *session, offset, length int) OutputResult {
 	localStart := int(start - retainedStart)
 	localEnd := int(end - retainedStart)
 	selected := append([]string(nil), lines[localStart:localEnd]...)
+	selectedStreams := append([]StreamLine(nil), streamLines[localStart:localEnd]...)
+	var latest *StreamLine
 	if offset == 0 {
+		if len(selected) == 0 && generationChanged {
+			latest = s.latestLineLocked()
+		}
 		s.lastReadAbs = end
+		s.lastReadGeneration = s.outputGeneration
 	}
 	state := s.state
 	if s.waitingForInput && s.exitCode == nil {
 		state = StateWaiting
 	}
-	return OutputResult{
-		PID: s.pid, State: state, ExitCode: cloneInt(s.exitCode), Lines: selected,
-		ReadFrom: int(start), ReadCount: len(selected), TotalLines: int(total), Remaining: int(total - end),
+	result := OutputResult{
+		PID: s.pid, State: state, ExitCode: cloneInt(s.exitCode), Generation: s.outputGeneration,
+		LatestLine: latest, ReadFrom: int(start), ReadCount: len(selected), TotalLines: int(total), Remaining: int(total - end),
 		EvictedLines: s.evictedLines, WaitingForInput: s.waitingForInput,
 		RuntimeMS: time.Since(s.startedAt).Milliseconds(),
 	}
+	if s.separateStreams && !s.usePTY {
+		result.Streams = selectedStreams
+	} else {
+		result.Lines = selected
+	}
+	return result
 }
 
 func (m *Manager) Interact(ctx context.Context, req InteractRequest) (InteractResult, error) {
@@ -119,7 +135,7 @@ func (m *Manager) Interact(ctx context.Context, req InteractRequest) (InteractRe
 	s.mu.Lock()
 	snapshotChars := s.totalCharsLocked()
 	s.mu.Unlock()
-	if err := s.write(req.Input); err != nil {
+	if err := s.write(req.Input, req.RawInput); err != nil {
 		return InteractResult{}, fmt.Errorf("write to process %d: %w", req.PID, err)
 	}
 	if req.WaitForPrompt {
@@ -194,6 +210,32 @@ func splitOutputLines(output string) []string {
 		lines = append(lines, output[start:])
 	}
 	return lines
+}
+
+func (m *Manager) ResizePTY(pid, rows, cols int) (PTYSizeResult, error) {
+	if rows < 1 || rows > 65535 || cols < 1 || cols > 65535 {
+		return PTYSizeResult{}, errors.New("rows and cols must be between 1 and 65535")
+	}
+	s, err := m.get(pid)
+	if err != nil {
+		return PTYSizeResult{}, err
+	}
+	s.mu.Lock()
+	if !s.usePTY || s.ptyFile == nil {
+		s.mu.Unlock()
+		return PTYSizeResult{}, fmt.Errorf("process %d is not a PTY session", pid)
+	}
+	if s.exitCode != nil {
+		s.mu.Unlock()
+		return PTYSizeResult{}, ErrProcessExited
+	}
+	file := s.ptyFile
+	if err := pty.Setsize(file, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+		s.mu.Unlock()
+		return PTYSizeResult{}, fmt.Errorf("resize PTY for process %d: %w", pid, err)
+	}
+	s.mu.Unlock()
+	return PTYSizeResult{PID: pid, Rows: rows, Cols: cols}, nil
 }
 
 func (m *Manager) ForceTerminate(pid int) error {

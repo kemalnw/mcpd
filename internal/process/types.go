@@ -11,30 +11,37 @@ const (
 )
 
 type StartRequest struct {
-	Command   string
-	CWD       string
-	Shell     string
-	TimeoutMS int
-	PTY       PTYMode
+	Command         string
+	CWD             string
+	Shell           string
+	TimeoutMS       int
+	PTY             PTYMode
+	SeparateStreams bool
+}
+
+type StreamLine struct {
+	Stream string `json:"stream,omitempty"`
+	Text   string `json:"text"`
 }
 
 type StartResult struct {
-	PID             int       `json:"pid"`
-	Command         string    `json:"command"`
-	CWD             string    `json:"cwd,omitempty"`
-	Shell           string    `json:"shell"`
-	PTY             bool      `json:"pty"`
-	State           State     `json:"state"`
-	StartedAt       time.Time `json:"started_at"`
-	ExitCode        *int      `json:"exit_code,omitempty"`
-	Output          []string  `json:"output,omitempty"`
-	ReadFrom        int       `json:"read_from"`
-	ReadCount       int       `json:"read_count"`
-	TotalLines      int       `json:"total_lines"`
-	Remaining       int       `json:"remaining"`
-	EvictedLines    int64     `json:"evicted_lines"`
-	WaitedMS        int64     `json:"waited_ms"`
-	WaitingForInput bool      `json:"waiting_for_input"`
+	PID             int          `json:"pid"`
+	Command         string       `json:"command"`
+	CWD             string       `json:"cwd,omitempty"`
+	Shell           string       `json:"shell"`
+	PTY             bool         `json:"pty"`
+	State           State        `json:"state"`
+	StartedAt       time.Time    `json:"started_at"`
+	ExitCode        *int         `json:"exit_code,omitempty"`
+	Output          []string     `json:"output,omitempty"`
+	Streams         []StreamLine `json:"streams,omitempty"`
+	ReadFrom        int          `json:"read_from"`
+	ReadCount       int          `json:"read_count"`
+	TotalLines      int          `json:"total_lines"`
+	Remaining       int          `json:"remaining"`
+	EvictedLines    int64        `json:"evicted_lines"`
+	WaitedMS        int64        `json:"waited_ms"`
+	WaitingForInput bool         `json:"waiting_for_input"`
 }
 
 type OutputRequest struct {
@@ -45,17 +52,20 @@ type OutputRequest struct {
 }
 
 type OutputResult struct {
-	PID             int      `json:"pid"`
-	State           State    `json:"state"`
-	ExitCode        *int     `json:"exit_code,omitempty"`
-	Lines           []string `json:"lines"`
-	ReadFrom        int      `json:"read_from"`
-	ReadCount       int      `json:"read_count"`
-	TotalLines      int      `json:"total_lines"`
-	Remaining       int      `json:"remaining"`
-	EvictedLines    int64    `json:"evicted_lines"`
-	WaitingForInput bool     `json:"waiting_for_input"`
-	RuntimeMS       int64    `json:"runtime_ms"`
+	PID             int          `json:"pid"`
+	State           State        `json:"state"`
+	ExitCode        *int         `json:"exit_code,omitempty"`
+	Lines           []string     `json:"lines,omitempty"`
+	Streams         []StreamLine `json:"streams,omitempty"`
+	LatestLine      *StreamLine  `json:"latest_line,omitempty"`
+	Generation      uint64       `json:"generation"`
+	ReadFrom        int          `json:"read_from"`
+	ReadCount       int          `json:"read_count"`
+	TotalLines      int          `json:"total_lines"`
+	Remaining       int          `json:"remaining"`
+	EvictedLines    int64        `json:"evicted_lines"`
+	WaitingForInput bool         `json:"waiting_for_input"`
+	RuntimeMS       int64        `json:"runtime_ms"`
 }
 
 type InteractRequest struct {
@@ -63,6 +73,7 @@ type InteractRequest struct {
 	Input         string
 	TimeoutMS     int
 	WaitForPrompt bool
+	RawInput      bool
 }
 
 type InteractResult struct {
@@ -87,6 +98,13 @@ type SessionInfo struct {
 	TotalLines      int       `json:"total_lines"`
 	EvictedLines    int64     `json:"evicted_lines"`
 	WaitingForInput bool      `json:"waiting_for_input"`
+	SeparateStreams bool      `json:"separate_streams,omitempty"`
+}
+
+type PTYSizeResult struct {
+	PID  int `json:"pid"`
+	Rows int `json:"rows"`
+	Cols int `json:"cols"`
 }
 
 type SystemProcess struct {

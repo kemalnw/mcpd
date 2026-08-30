@@ -9,6 +9,7 @@ var toolScopes = map[string]string{
 	"start_process":           ScopeWrite,
 	"read_process_output":     ScopeRead,
 	"interact_with_process":   ScopeWrite,
+	"resize_process_pty":      ScopeWrite,
 	"force_terminate":         ScopeWrite,
 	"list_sessions":           ScopeRead,
 	"list_processes":          ScopeRead,

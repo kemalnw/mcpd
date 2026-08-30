@@ -19,9 +19,10 @@ type ProcessTools struct {
 
 func RegisterProcess(server *mcp.Server, manager *processmgr.Manager, auditStore *audit.Store) {
 	t := &ProcessTools{manager: manager, audit: auditStore}
-	mcp.AddTool(server, tool("start_process", "Run a shell command", "Use this for shell commands, builds, tests, package managers, Git, service inspection, and other terminal work. For repository-scoped work, pass cwd instead of embedding `cd <path> &&` in the command; this keeps commands shorter and avoids shell quoting around project paths. Prefer dedicated MCPD file/search tools when the task only needs reading, listing, searching, or editing files. The call returns on process exit, an interactive prompt, or timeout_ms; a wait timeout never kills the process. Initial output is capped to the configured page size and reports read_from, read_count, total_lines, and remaining; continue the PID with read_process_output for additional retained or future output, or interact_with_process when input is required.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process", t.start))
-	mcp.AddTool(server, tool("read_process_output", "Read command output", "Use this only for a PID returned by start_process. Read retained stdout/stderr and process state without starting another command. offset=0 reads new output from the session cursor; positive offsets read an absolute retained range; negative offsets read from the tail. Prefer this over starting a second shell command merely to inspect an existing MCPD process.", toolHints{readOnly: true}), audited(auditStore, "read_process_output", t.readOutput))
-	mcp.AddTool(server, tool("interact_with_process", "Send input to a command", "Use this only for an interactive PID returned by start_process when the process is waiting for stdin, a confirmation, password-free prompt, REPL input, or similar interaction. Do not use it for a new command; use start_process instead. A newline is appended when absent.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "interact_with_process", t.interact))
+	mcp.AddTool(server, tool("start_process", "Run a shell command", "Use this for shell commands, builds, tests, package managers, Git, service inspection, and other terminal work. For repository-scoped work, pass cwd instead of embedding `cd <path> &&`. For non-PTY commands, set separate_streams=true only when stdout/stderr identity matters; default merged output remains more compact. The call returns on exit, prompt, or timeout without killing a running process. Continue the same PID with read_process_output or interact_with_process.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process", t.start))
+	mcp.AddTool(server, tool("read_process_output", "Read command output", "Use this only for a PID returned by start_process. offset=0 waits for unread output and advances the cursor; it also observes same-line/partial updates through generation + latest_line even when no newline was emitted. Positive offsets are absolute retained ranges and negative offsets read from the tail without moving the cursor. Sessions started with separate_streams return stream-tagged records instead of duplicate merged lines.", toolHints{readOnly: true}), audited(auditStore, "read_process_output", t.readOutput))
+	mcp.AddTool(server, tool("interact_with_process", "Send input to a command", "Use this only for an interactive PID returned by start_process. By default MCPD appends a newline when absent; set raw_input=true for exact bytes/control-oriented input where no newline should be added. wait_for_prompt controls whether the call waits for another prompt or process completion.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "interact_with_process", t.interact))
+	mcp.AddTool(server, tool("resize_process_pty", "Resize a command PTY", "Use this only for a running PTY session returned by start_process when the terminal dimensions need to change, for example before driving a TUI. rows and cols must be positive terminal cell counts. Non-PTY or exited sessions are rejected.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "resize_process_pty", t.resizePTY))
 	mcp.AddTool(server, tool("force_terminate", "Stop a managed command", "Use this to stop a process session created by start_process. It targets the managed process group, sends SIGINT first, and escalates to SIGKILL if needed. Prefer this over kill_process for MCPD-managed sessions because it handles the process group and cleanup correctly.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "force_terminate", t.forceTerminate))
 	mcp.AddTool(server, tool("list_sessions", "List MCPD command sessions", "Use this to discover PIDs and state for commands previously started through start_process, including retained completed sessions. Prefer list_processes only when you need the full operating-system process table rather than MCPD-managed sessions.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_sessions", t.listSessions))
 	mcp.AddTool(server, tool("list_processes", "List Linux processes", "Use this to inspect the operating-system process table visible to the MCPD daemon user, including PID, CPU, memory, and command line. Prefer list_sessions when the target was started through MCPD and you need its managed session state or retained output.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_processes", t.listProcesses))
@@ -29,12 +30,13 @@ func RegisterProcess(server *mcp.Server, manager *processmgr.Manager, auditStore
 }
 
 type StartProcessInput struct {
-	Command       string `json:"command" jsonschema:"shell command to execute"`
-	CWD           string `json:"cwd,omitempty" jsonschema:"optional working directory for the command; prefer this over embedding cd in repository-scoped commands"`
-	TimeoutMS     int    `json:"timeout_ms" jsonschema:"maximum milliseconds this tool call waits before returning control; the process keeps running after the wait expires"`
-	Shell         string `json:"shell,omitempty" jsonschema:"optional shell executable; defaults to the configured shell"`
-	VerboseTiming bool   `json:"verbose_timing,omitempty" jsonschema:"accepted for Desktop Commander compatibility; timing fields are always returned in structured output"`
-	PTY           string `json:"pty,omitempty" jsonschema:"mcpd extension: PTY mode auto, always, or never; defaults to auto"`
+	Command         string `json:"command" jsonschema:"shell command to execute"`
+	CWD             string `json:"cwd,omitempty" jsonschema:"optional working directory for the command; prefer this over embedding cd in repository-scoped commands"`
+	TimeoutMS       int    `json:"timeout_ms" jsonschema:"maximum milliseconds this tool call waits before returning control; the process keeps running after the wait expires"`
+	Shell           string `json:"shell,omitempty" jsonschema:"optional shell executable; defaults to the configured shell"`
+	VerboseTiming   bool   `json:"verbose_timing,omitempty" jsonschema:"accepted for Desktop Commander compatibility; timing fields are always returned in structured output"`
+	PTY             string `json:"pty,omitempty" jsonschema:"mcpd extension: PTY mode auto, always, or never; defaults to auto"`
+	SeparateStreams bool   `json:"separate_streams,omitempty" jsonschema:"for non-PTY commands, return stdout/stderr as stream-tagged records instead of merged lines"`
 }
 
 type ReadProcessOutputInput struct {
@@ -51,6 +53,13 @@ type InteractWithProcessInput struct {
 	TimeoutMS     int    `json:"timeout_ms,omitempty" jsonschema:"maximum milliseconds to wait for a response; defaults to 8000"`
 	WaitForPrompt *bool  `json:"wait_for_prompt,omitempty" jsonschema:"wait for another prompt or process completion before returning; defaults to true"`
 	VerboseTiming bool   `json:"verbose_timing,omitempty" jsonschema:"accepted for Desktop Commander compatibility"`
+	RawInput      bool   `json:"raw_input,omitempty" jsonschema:"send input exactly as provided without appending a newline"`
+}
+
+type ResizePTYInput struct {
+	PID  int `json:"pid" jsonschema:"PID returned by start_process for a PTY session"`
+	Rows int `json:"rows" jsonschema:"terminal height in rows"`
+	Cols int `json:"cols" jsonschema:"terminal width in columns"`
 }
 
 type PIDInput struct {
@@ -74,7 +83,7 @@ type ProcessesOutput struct {
 }
 
 func (t *ProcessTools) start(ctx context.Context, in StartProcessInput) (processmgr.StartResult, error) {
-	return t.manager.Start(ctx, processmgr.StartRequest{Command: in.Command, CWD: in.CWD, Shell: in.Shell, TimeoutMS: in.TimeoutMS, PTY: processmgr.PTYMode(in.PTY)})
+	return t.manager.Start(ctx, processmgr.StartRequest{Command: in.Command, CWD: in.CWD, Shell: in.Shell, TimeoutMS: in.TimeoutMS, PTY: processmgr.PTYMode(in.PTY), SeparateStreams: in.SeparateStreams})
 }
 
 func (t *ProcessTools) readOutput(ctx context.Context, in ReadProcessOutputInput) (processmgr.OutputResult, error) {
@@ -86,7 +95,11 @@ func (t *ProcessTools) interact(ctx context.Context, in InteractWithProcessInput
 	if in.WaitForPrompt != nil {
 		wait = *in.WaitForPrompt
 	}
-	return t.manager.Interact(ctx, processmgr.InteractRequest{PID: in.PID, Input: in.Input, TimeoutMS: in.TimeoutMS, WaitForPrompt: wait})
+	return t.manager.Interact(ctx, processmgr.InteractRequest{PID: in.PID, Input: in.Input, TimeoutMS: in.TimeoutMS, WaitForPrompt: wait, RawInput: in.RawInput})
+}
+
+func (t *ProcessTools) resizePTY(_ context.Context, in ResizePTYInput) (processmgr.PTYSizeResult, error) {
+	return t.manager.ResizePTY(in.PID, in.Rows, in.Cols)
 }
 
 func (t *ProcessTools) forceTerminate(_ context.Context, in PIDInput) (TerminateOutput, error) {

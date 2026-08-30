@@ -3,6 +3,7 @@ package process
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -12,28 +13,34 @@ import (
 type session struct {
 	mu sync.Mutex
 
-	cmd     *exec.Cmd
-	stdin   io.Writer
-	closer  io.Closer
-	pid     int
-	command string
-	cwd     string
-	shell   string
-	usePTY  bool
+	cmd             *exec.Cmd
+	stdin           io.Writer
+	closer          io.Closer
+	pid             int
+	command         string
+	cwd             string
+	shell           string
+	usePTY          bool
+	separateStreams bool
+	ptyFile         *os.File
 
 	startedAt time.Time
 	state     State
 	exitCode  *int
 	waitErr   error
 
-	lines        []string
-	partial      string
-	bufferBytes  int
-	maxBytes     int
-	maxLineBytes int
-	evictedLines int64
-	evictedChars int64
-	lastReadAbs  int64
+	lines              []string
+	lineStreams        []string
+	partial            string
+	partialStream      string
+	bufferBytes        int
+	maxBytes           int
+	maxLineBytes       int
+	evictedLines       int64
+	evictedChars       int64
+	lastReadAbs        int64
+	outputGeneration   uint64
+	lastReadGeneration uint64
 
 	waitingForInput  bool
 	promptGeneration uint64
@@ -45,28 +52,41 @@ type session struct {
 	notify    chan struct{}
 }
 
-func newSession(cmd *exec.Cmd, stdin io.Writer, closer io.Closer, command, cwd, shell string, usePTY bool, maxBytes, maxLineBytes int) *session {
+func newSession(cmd *exec.Cmd, stdin io.Writer, closer io.Closer, command, cwd, shell string, usePTY, separateStreams bool, maxBytes, maxLineBytes int) *session {
 	return &session{
 		cmd: cmd, stdin: stdin, closer: closer, pid: 0,
-		command: command, cwd: cwd, shell: shell, usePTY: usePTY,
+		command: command, cwd: cwd, shell: shell, usePTY: usePTY, separateStreams: separateStreams,
 		startedAt: time.Now().UTC(), state: StateRunning,
 		maxBytes: maxBytes, maxLineBytes: maxLineBytes,
 		done: make(chan struct{}), notify: make(chan struct{}),
 	}
 }
 
-func (s *session) feed(data []byte) {
+func (s *session) feed(data []byte, stream string) {
 	if len(data) == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !s.separateStreams {
+		stream = ""
+	}
+	if s.partial != "" && s.separateStreams && s.partialStream != "" && stream != s.partialStream {
+		s.appendLineLocked(strings.TrimSuffix(s.partial, "\r"), s.partialStream)
+		s.partial = ""
+		s.partialStream = ""
+	}
 	raw := s.partial + string(data)
 	parts := strings.Split(raw, "\n")
 	s.partial = parts[len(parts)-1]
+	if s.partial != "" {
+		s.partialStream = stream
+	} else {
+		s.partialStream = ""
+	}
 	for _, line := range parts[:len(parts)-1] {
-		s.appendLineLocked(strings.TrimSuffix(line, "\r"))
+		s.appendLineLocked(strings.TrimSuffix(line, "\r"), stream)
 	}
 	if len(s.partial) > s.maxLineBytes {
 		s.partial = s.partial[:s.maxLineBytes] + " [line truncated]"
@@ -76,6 +96,7 @@ func (s *session) feed(data []byte) {
 	if len(s.tail) > 4096 {
 		s.tail = s.tail[len(s.tail)-4096:]
 	}
+	s.outputGeneration++
 	s.promptGeneration++
 	s.waitingForInput = false
 	if s.state == StateWaiting {
@@ -103,11 +124,12 @@ func (s *session) confirmPrompt(generation uint64) {
 	s.signalLocked()
 }
 
-func (s *session) appendLineLocked(line string) {
+func (s *session) appendLineLocked(line, stream string) {
 	if len(line) > s.maxLineBytes {
 		line = line[:s.maxLineBytes] + " [line truncated]"
 	}
 	s.lines = append(s.lines, line)
+	s.lineStreams = append(s.lineStreams, stream)
 	s.bufferBytes += len(line) + 1
 }
 
@@ -118,6 +140,9 @@ func (s *session) enforceLimitLocked() {
 		s.evictedChars += int64(evictedBytes)
 		s.lines[0] = ""
 		s.lines = s.lines[1:]
+		if len(s.lineStreams) > 0 {
+			s.lineStreams = s.lineStreams[1:]
+		}
 		s.evictedLines++
 	}
 	if s.lastReadAbs < s.evictedLines {
@@ -133,8 +158,9 @@ func (s *session) signalLocked() {
 func (s *session) markExited(err error) {
 	s.mu.Lock()
 	if s.partial != "" {
-		s.appendLineLocked(strings.TrimSuffix(s.partial, "\r"))
+		s.appendLineLocked(strings.TrimSuffix(s.partial, "\r"), s.partialStream)
 		s.partial = ""
+		s.partialStream = ""
 	}
 	code := -1
 	if s.cmd.ProcessState != nil {
@@ -162,7 +188,7 @@ func (s *session) markStopping() {
 	s.mu.Unlock()
 }
 
-func (s *session) write(input string) error {
+func (s *session) write(input string, raw bool) error {
 	s.mu.Lock()
 	if s.exitCode != nil {
 		s.mu.Unlock()
@@ -180,7 +206,7 @@ func (s *session) write(input string) error {
 	if writer == nil {
 		return fmt.Errorf("process %d has no writable stdin", s.pid)
 	}
-	if !strings.HasSuffix(input, "\n") {
+	if !raw && !strings.HasSuffix(input, "\n") {
 		input += "\n"
 	}
 	_, err := io.WriteString(writer, input)
@@ -195,7 +221,7 @@ func (s *session) snapshot() SessionInfo {
 		lines++
 	}
 	return SessionInfo{
-		PID: s.pid, Command: s.command, CWD: s.cwd, Shell: s.shell, PTY: s.usePTY,
+		PID: s.pid, Command: s.command, CWD: s.cwd, Shell: s.shell, PTY: s.usePTY, SeparateStreams: s.separateStreams,
 		State: s.state, StartedAt: s.startedAt, RuntimeMS: time.Since(s.startedAt).Milliseconds(),
 		ExitCode: cloneInt(s.exitCode), TotalLines: int(s.evictedLines) + lines,
 		EvictedLines: s.evictedLines, WaitingForInput: s.waitingForInput,
@@ -223,6 +249,36 @@ func (s *session) snapshotLinesLocked() []string {
 		out = append(out, s.partial)
 	}
 	return out
+}
+
+func (s *session) snapshotStreamsLocked() []StreamLine {
+	out := make([]StreamLine, 0, len(s.lines)+1)
+	for i, line := range s.lines {
+		stream := ""
+		if i < len(s.lineStreams) {
+			stream = s.lineStreams[i]
+		}
+		out = append(out, StreamLine{Stream: stream, Text: line})
+	}
+	if s.partial != "" {
+		out = append(out, StreamLine{Stream: s.partialStream, Text: s.partial})
+	}
+	return out
+}
+
+func (s *session) latestLineLocked() *StreamLine {
+	if s.partial != "" {
+		return &StreamLine{Stream: s.partialStream, Text: s.partial}
+	}
+	if len(s.lines) == 0 {
+		return nil
+	}
+	i := len(s.lines) - 1
+	stream := ""
+	if i < len(s.lineStreams) {
+		stream = s.lineStreams[i]
+	}
+	return &StreamLine{Stream: stream, Text: s.lines[i]}
 }
 
 func (s *session) fullOutputLocked() string {

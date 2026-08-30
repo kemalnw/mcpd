@@ -75,7 +75,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
-	s, err := m.startCommand(cmd, req.Command, cwd, shell, usePTY)
+	s, err := m.startCommand(cmd, req.Command, cwd, shell, usePTY, req.SeparateStreams)
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -86,13 +86,19 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	m.waitForStart(ctx, s, time.Duration(waitMS)*time.Millisecond)
 	info := s.snapshot()
 	page := m.readInitialOutput(s)
-	return StartResult{
+	result := StartResult{
 		PID: info.PID, Command: info.Command, CWD: info.CWD, Shell: info.Shell, PTY: info.PTY,
 		State: info.State, StartedAt: info.StartedAt, ExitCode: info.ExitCode,
-		Output: page.Lines, ReadFrom: page.ReadFrom, ReadCount: page.ReadCount,
+		ReadFrom: page.ReadFrom, ReadCount: page.ReadCount,
 		TotalLines: page.TotalLines, Remaining: page.Remaining, EvictedLines: page.EvictedLines,
 		WaitedMS: time.Since(started).Milliseconds(), WaitingForInput: info.WaitingForInput,
-	}, nil
+	}
+	if req.SeparateStreams && !usePTY {
+		result.Streams = page.Streams
+	} else {
+		result.Output = page.Lines
+	}
+	return result, nil
 }
 
 func resolveCWD(cwd string) (string, error) {
@@ -116,13 +122,14 @@ func resolveCWD(cwd string) (string, error) {
 	return abs, nil
 }
 
-func (m *Manager) startCommand(cmd *exec.Cmd, command, cwd, shell string, usePTY bool) (*session, error) {
+func (m *Manager) startCommand(cmd *exec.Cmd, command, cwd, shell string, usePTY, separateStreams bool) (*session, error) {
 	if usePTY {
 		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
 		if err != nil {
 			return nil, fmt.Errorf("start PTY process: %w", err)
 		}
-		s := newSession(cmd, ptmx, ptmx, command, cwd, shell, true, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
+		s := newSession(cmd, ptmx, ptmx, command, cwd, shell, true, false, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
+		s.ptyFile = ptmx
 		s.pid = cmd.Process.Pid
 		s.captureWG.Add(1)
 		go m.capture(s, ptmx)
@@ -134,13 +141,13 @@ func (m *Manager) startCommand(cmd *exec.Cmd, command, cwd, shell string, usePTY
 	if err != nil {
 		return nil, fmt.Errorf("create stdin pipe: %w", err)
 	}
-	s := newSession(cmd, stdin, stdin, command, cwd, shell, false, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
+	s := newSession(cmd, stdin, stdin, command, cwd, shell, false, separateStreams, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
 	// Assign writers directly instead of using StdoutPipe/StderrPipe. os/exec then
 	// owns the copy goroutines and Cmd.Wait does not return until their final bytes
 	// are delivered to sessionWriter. This avoids the documented Wait-vs-Read race
 	// for very short-lived commands.
-	cmd.Stdout = sessionWriter{s: s}
-	cmd.Stderr = sessionWriter{s: s}
+	cmd.Stdout = sessionWriter{s: s, stream: "stdout"}
+	cmd.Stderr = sessionWriter{s: s, stream: "stderr"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start process: %w", err)
@@ -156,7 +163,7 @@ func (m *Manager) capture(s *session, reader io.Reader) {
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
-			s.feed(buf[:n])
+			s.feed(buf[:n], "pty")
 		}
 		if err != nil {
 			return
@@ -167,9 +174,13 @@ func (m *Manager) capture(s *session, reader io.Reader) {
 func (m *Manager) wait(s *session) {
 	err := s.cmd.Wait()
 	if s.usePTY {
+		s.mu.Lock()
 		if s.closer != nil {
 			_ = s.closer.Close()
+			s.closer = nil
+			s.ptyFile = nil
 		}
+		s.mu.Unlock()
 		s.captureWG.Wait()
 	}
 	s.markExited(err)
@@ -177,10 +188,13 @@ func (m *Manager) wait(s *session) {
 	m.markCompleted(s.pid)
 }
 
-type sessionWriter struct{ s *session }
+type sessionWriter struct {
+	s      *session
+	stream string
+}
 
 func (w sessionWriter) Write(p []byte) (int, error) {
-	w.s.feed(p)
+	w.s.feed(p, w.stream)
 	return len(p), nil
 }
 
@@ -250,6 +264,7 @@ func (m *Manager) ListSessions() []SessionInfo {
 
 type initialOutputPage struct {
 	Lines        []string
+	Streams      []StreamLine
 	ReadFrom     int
 	ReadCount    int
 	TotalLines   int
@@ -270,11 +285,14 @@ func (m *Manager) readInitialOutput(s *session) initialOutputPage {
 	}
 	localEnd := int(end - retainedStart)
 	selected := append([]string(nil), lines[:localEnd]...)
+	streamLines := s.snapshotStreamsLocked()
+	selectedStreams := append([]StreamLine(nil), streamLines[:localEnd]...)
 	if end > s.lastReadAbs {
 		s.lastReadAbs = end
 	}
+	s.lastReadGeneration = s.outputGeneration
 	return initialOutputPage{
-		Lines: selected, ReadFrom: int(retainedStart), ReadCount: len(selected), TotalLines: int(total),
+		Lines: selected, Streams: selectedStreams, ReadFrom: int(retainedStart), ReadCount: len(selected), TotalLines: int(total),
 		Remaining: int(total - end), EvictedLines: s.evictedLines,
 	}
 }
