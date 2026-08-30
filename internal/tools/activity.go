@@ -127,6 +127,12 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs := []slog.Attr{slog.Int("tail_lines", v.TailLines)}
 		attrs = appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
 		return appendLogString(attrs, "job_id", v.JobID, maxMetadataLogBytes)
+	case HandoffRunInput:
+		attrs := []slog.Attr{slog.Uint64("expected_revision", v.ExpectedRevision), slog.Int("summary_bytes", len(v.Summary)), slog.Int("blocker_count", len(v.Blockers)), slog.Int("active_handle_count", len(v.ActiveHandles)), slog.Int("next_action_count", len(v.NextActions))}
+		attrs = appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
+		return appendLogString(attrs, "checkpoint_reason", v.Reason, maxMetadataLogBytes)
+	case ResumeRunInput:
+		return appendLogString(nil, "run_id", v.RunID, maxMetadataLogBytes)
 	case StartSearchInput:
 		attrs := []slog.Attr{slog.Int("max_results", v.MaxResults), slog.Bool("include_hidden", v.IncludeHidden), slog.Int("timeout_ms", v.TimeoutMS), slog.Int("pattern_bytes", len(v.Pattern))}
 		attrs = appendLogString(attrs, "path", v.Path, maxMetadataLogBytes)
@@ -176,6 +182,16 @@ func toolOutputAttrs(out any) []slog.Attr {
 	case TerminateOutput:
 		attrs := []slog.Attr{slog.Int("pid", v.PID), slog.Bool("terminated", v.Terminated)}
 		return appendLogString(attrs, "signal", v.Signal, maxMetadataLogBytes)
+	case RunView:
+		return []slog.Attr{slog.String("run_id", v.Run.ID), slog.Uint64("revision", v.Run.Revision), slog.String("run_state", string(v.Run.State)), slog.Int("running", v.Counts.Running), slog.Int("blocked", v.Counts.Blocked), slog.Int("failed", v.Counts.Failed), slog.Int("completed", v.Counts.Completed)}
+	case ListRunsOutput:
+		return []slog.Attr{slog.Int("run_count", len(v.Runs))}
+	case RunJobLogOutput:
+		attrs := []slog.Attr{slog.Int("line_count", len(v.Lines))}
+		attrs = appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
+		return appendLogString(attrs, "job_id", v.JobID, maxMetadataLogBytes)
+	case ResumeRunOutput:
+		return []slog.Attr{slog.String("run_id", v.RunID), slog.Uint64("revision", v.Revision), slog.String("run_state", string(v.State)), slog.Bool("checkpoint_due", v.CheckpointDue), slog.Int64("checkpoint_age_seconds", v.CheckpointAgeSeconds), slog.Int("returned_items", len(v.Items)), slog.Int("items_omitted", v.ItemsOmitted)}
 	default:
 		return nil
 	}

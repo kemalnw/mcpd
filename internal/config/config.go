@@ -23,6 +23,7 @@ const (
 	defaultCompletedSessions   = 100
 	defaultBatchMaxParallel    = 4
 	defaultBatchGlobalParallel = 0 // auto from host resources
+	defaultCheckpointInterval  = 15 * 60
 	defaultFileReadLines       = 1000
 	defaultNestedEntries       = 100
 	defaultHTTPTimeoutSecs     = 15
@@ -76,7 +77,8 @@ type AuditConfig struct {
 }
 
 type WorkflowConfig struct {
-	StateDir string `toml:"state_dir"`
+	StateDir                  string `toml:"state_dir"`
+	CheckpointIntervalSeconds int    `toml:"checkpoint_interval_seconds"`
 }
 
 type AuthConfig struct {
@@ -98,7 +100,7 @@ func Default() Config {
 		Files:    FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
 		Search:   SearchConfig{DefaultMaxResults: 1000, RetentionSeconds: 300, InitialWaitMS: 40},
 		Audit:    AuditConfig{Enabled: true, Path: defaultAuditPath()},
-		Workflow: WorkflowConfig{StateDir: filepath.Join(stateDir, "runs")},
+		Workflow: WorkflowConfig{StateDir: filepath.Join(stateDir, "runs"), CheckpointIntervalSeconds: defaultCheckpointInterval},
 		Auth: AuthConfig{StateDir: filepath.Join(stateDir, "auth"), AccessTokenSeconds: 3600, RefreshTokenIdleSeconds: 30 * 24 * 60 * 60, AuthorizationCodeSeconds: 300,
 			LoginSessionSeconds: 600, ClientMetadataTimeoutSeconds: 10},
 	}
@@ -156,6 +158,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Workflow.StateDir) == "" {
 		return errors.New("workflow.state_dir is required")
+	}
+	if c.Workflow.CheckpointIntervalSeconds <= 0 {
+		return errors.New("workflow.checkpoint_interval_seconds must be positive")
 	}
 	if c.Process.DefaultShell == "" {
 		return errors.New("process.default_shell must not be empty")

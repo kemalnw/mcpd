@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	workflowmgr "github.com/kemalnw/mcpd/internal/workflow"
 )
@@ -15,7 +16,7 @@ func testWorkflowTools(t *testing.T) *WorkflowTools {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &WorkflowTools{store: store}
+	return &WorkflowTools{store: store, checkpointInterval: 15 * time.Minute, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func TestWorkflowCreateCheckpointResume(t *testing.T) {

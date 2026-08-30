@@ -25,9 +25,10 @@ Use this workflow when engineering work has multiple independent lanes, expensiv
 9. Every item must satisfy its local quality gate before PR/merge. Remote CI must be green before merge.
 10. After upstream merges, rebase overlapping/in-flight branches and rerun affected validation.
 11. Run a final integration gate on resulting `main` before release/deploy.
-12. For long work, checkpoint objective, completed work, blockers, evidence, and next actions in MCPD durable runs when available.
-13. Retries of expensive work must use idempotency keys when supported.
-14. Never claim background completion. If work cannot be completed in the current agent session, leave a durable checkpoint that a fresh session can resume.
+12. Treat the supervising AI session as ephemeral. For long work, checkpoint objective, completed work, blockers, evidence, active handles, and next actions in MCPD durable runs when available.
+13. Do not rely on a specific host timeout such as two hours. If `resume_run` reports `checkpoint_due=true`, checkpoint promptly; also hand off before long waits and before an anticipated session/turn/context limit.
+14. Retries of expensive work must use idempotency keys when supported.
+15. Never claim background completion. If work cannot be completed in the current agent session, call `handoff_run` when available so a fresh session can continue from `run_id`.
 
 ## Tool-selection fast path
 
@@ -40,7 +41,7 @@ Read [references/tool-selection.md](references/tool-selection.md) before a large
 - Two or more independent shell jobs -> prefer `start_process_batch` when present.
 - Existing PID -> `read_process_output` / `interact_with_process`; do not spawn a replacement inspection command.
 - Existing batch -> `read_process_batch` with changed-only semantics when present.
-- Long-horizon workflow -> use durable run/checkpoint tools when present.
+- Long-horizon workflow -> use durable run/checkpoint tools when present. In a fresh session prefer `resume_run`; before session loss/long waits prefer `handoff_run`.
 
 Capability rule: MCP clients can cache old tool schemas. Use the best primitive actually exposed in the current tool catalog; do not invent unavailable fields/tools. If server and client schemas disagree after an upgrade, verify fresh `tools/list` and reconnect/reload the client.
 
@@ -94,9 +95,15 @@ Once all required items are merged:
 - deploy the exact validated/released binary;
 - verify service health/version and a fresh MCP `tools/list` schema.
 
-### 8. Checkpoint long work
+### 8. Checkpoint and hand off long work
 
-When durable run tools are exposed, checkpoint after meaningful state transitions: issue/PR created, implementation green, CI green, merge, conflict/blocker, release/deploy. A resume summary should answer: what is done, what is running, what failed, what is blocked, and what is ready next—without embedding full logs.
+When durable run tools are exposed, checkpoint after meaningful state transitions: issue/PR created, implementation green, CI green, merge, conflict/blocker, release/deploy. For multi-hour work, also honor MCPD's advisory checkpoint interval: if `resume_run.checkpoint_due` is true, update the checkpoint before doing more expensive work.
+
+The AI session itself is not durable. Before a long wait, before an anticipated turn/context/session boundary, or when forced to stop with work still active, call `handoff_run`. Treat the handoff as a recovery record, not prose memory: record factual evidence references, active side effects, blockers, pending approvals, cleanup state, explicit `do_not_repeat` operations, and reconnectable PID/batch/job/PR/worktree/search handles. Keep advisory recommendations separate and include their source/confidence/revalidation needs. Never persist credentials or claim that approval/write authority transfers to the next session.
+
+For a long wait, record the external handle's last observed state, earliest useful next poll time, deadline when known, and cancellation path before yielding. Do not encode a guessed host limit such as two hours into the workflow; checkpoint often enough that an earlier host cutoff is recoverable.
+
+A fresh session should start with `resume_run(run_id)` rather than replaying the previous chat or rediscovering the repository. First inspect `checkpoint_freshness`; `future_clock_skew`, `missing`, or overdue state requires revalidation before new side effects. The resume summary must answer: what is done, what is running, what failed, what is blocked, what must not be repeated, what evidence was last verified, what handles can be reattached, and what is ready next—without embedding full logs. Pending approvals always require fresh current-session authority.
 
 ## Quality bar
 

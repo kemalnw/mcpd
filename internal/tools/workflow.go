@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/kemalnw/mcpd/internal/audit"
 	workflowmgr "github.com/kemalnw/mcpd/internal/workflow"
@@ -11,16 +12,19 @@ import (
 )
 
 type WorkflowTools struct {
-	store *workflowmgr.Store
+	store              *workflowmgr.Store
+	checkpointInterval time.Duration
+	now                func() time.Time
 }
 
-func RegisterWorkflow(server *mcp.Server, store *workflowmgr.Store, auditStore *audit.Store) {
-	t := &WorkflowTools{store: store}
+func RegisterWorkflow(server *mcp.Server, store *workflowmgr.Store, auditStore *audit.Store, checkpointInterval time.Duration) {
+	t := &WorkflowTools{store: store, checkpointInterval: checkpointInterval, now: func() time.Time { return time.Now().UTC() }}
 	mcp.AddTool(server, tool("create_run", "Create a durable engineering run", "Use this at the beginning of substantial or long-horizon engineering work that may span many jobs, PRs, waits, or client reconnects. Store the stable objective and success criteria once; use checkpoint_run for mutable progress. The returned run_id is the durable resume handle.", toolHints{destructive: true}), audited(auditStore, "create_run", t.createRun))
 	mcp.AddTool(server, tool("checkpoint_run", "Checkpoint engineering progress", "Use this after meaningful workflow transitions such as implementation green, CI result, merge, blocker, or release step. expected_revision provides optimistic concurrency: read the latest run before retrying a revision conflict. Keep summaries and next actions compact; full command logs belong in job logs.", toolHints{destructive: true}), audited(auditStore, "checkpoint_run", t.checkpointRun))
 	mcp.AddTool(server, tool("get_run", "Resume a durable engineering run", "Use this with a known run_id to reconstruct current objective, work items, counts, blockers, and next actions without replaying chat history or command logs. A fresh client should prefer this over rediscovering completed work.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "get_run", t.getRun))
 	mcp.AddTool(server, tool("list_runs", "List durable engineering runs", "Use this to rediscover recent durable run handles and compact status when run_id is unknown. The result is metadata-only and does not inline job logs.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_runs", t.listRuns))
 	mcp.AddTool(server, tool("read_run_job_log", "Read a durable job log tail", "Use this only when a run summary/failure indicates deeper execution evidence is needed. Returns a bounded tail from a disk-backed job log instead of loading the full log into model context.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "read_run_job_log", t.readJobLog))
+	registerHandoffTools(server, t, auditStore)
 }
 
 type RunWorkItemInput struct {
@@ -117,9 +121,11 @@ func (t *WorkflowTools) checkpointRun(_ context.Context, in CheckpointRunInput) 
 	if err != nil {
 		return RunView{}, err
 	}
+	checkpointedAt := t.now()
 	run, err := t.store.Update(in.RunID, in.ExpectedRevision, func(run *workflowmgr.Run) error {
 		run.State = state
 		run.Phase = strings.TrimSpace(in.Phase)
+		run.LastCheckpointAt = checkpointedAt
 		if in.ReplaceItems {
 			run.Items = items
 		}

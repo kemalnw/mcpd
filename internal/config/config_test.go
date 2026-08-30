@@ -35,8 +35,8 @@ func TestLoadOverlaysDefaults(t *testing.T) {
 	if cfg.Search.DefaultMaxResults != 1000 || cfg.Search.RetentionSeconds != 300 || cfg.Search.InitialWaitMS != 40 {
 		t.Fatalf("search defaults were not preserved: %+v", cfg.Search)
 	}
-	if cfg.Workflow.StateDir == "" {
-		t.Fatalf("workflow default was not preserved: %+v", cfg.Workflow)
+	if cfg.Workflow.StateDir == "" || cfg.Workflow.CheckpointIntervalSeconds != defaultCheckpointInterval {
+		t.Fatalf("workflow defaults were not preserved: %+v", cfg.Workflow)
 	}
 	if cfg.Auth.RefreshTokenIdleSeconds != 30*24*60*60 {
 		t.Fatalf("refresh-token default was not preserved: %+v", cfg.Auth)
@@ -53,6 +53,14 @@ func TestInvalidProcessConfig(t *testing.T) {
 	cfg.Process.BatchGlobalParallel = -1
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() accepted negative process.batch_global_parallel")
+	}
+}
+
+func TestInvalidWorkflowCheckpointInterval(t *testing.T) {
+	cfg := Default()
+	cfg.Workflow.CheckpointIntervalSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted zero workflow.checkpoint_interval_seconds")
 	}
 }
 
@@ -101,8 +109,8 @@ client_metadata_timeout_seconds = 10
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Workflow.StateDir == "" {
-		t.Fatalf("workflow default was not preserved: %+v", cfg.Workflow)
+	if cfg.Workflow.StateDir == "" || cfg.Workflow.CheckpointIntervalSeconds != defaultCheckpointInterval {
+		t.Fatalf("workflow defaults were not preserved: %+v", cfg.Workflow)
 	}
 	if cfg.Auth.RefreshTokenIdleSeconds != 30*24*60*60 {
 		t.Fatalf("legacy config refresh_token_idle_seconds = %d, want %d", cfg.Auth.RefreshTokenIdleSeconds, 30*24*60*60)
