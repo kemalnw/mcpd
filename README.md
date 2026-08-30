@@ -111,6 +111,8 @@ Common lifecycle commands:
 ```bash
 sudo mcpd start
 sudo mcpd restart
+mcpd update --check
+sudo mcpd update
 mcpd status
 mcpd logs --lines 100
 mcpd logs --follow

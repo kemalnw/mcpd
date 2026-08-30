@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/kemalnw/mcpd/internal/service"
+	"github.com/kemalnw/mcpd/internal/version"
 )
 
 func installCommand(args []string) error {
@@ -62,6 +63,24 @@ func restartCommand(args []string) error {
 	}
 	return service.Restart(os.Stdout, os.Stderr)
 }
+
+func updateCommand(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	checkOnly := fs.Bool("check", false, "check whether a newer release is available without installing it")
+	force := fs.Bool("force", false, "reinstall the latest release even when it is not newer")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("update does not accept positional arguments")
+	}
+	return service.Update(os.Stdout, os.Stderr, service.UpdateOptions{
+		CurrentVersion: version.Current().Version,
+		CheckOnly:      *checkOnly,
+		Force:          *force,
+	})
+}
+
 func statusCommand(args []string) error {
 	if len(args) != 0 {
 		return errors.New("status does not accept arguments")

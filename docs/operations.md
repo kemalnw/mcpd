@@ -18,6 +18,8 @@ Use the CLI instead of calling systemd directly for normal administration:
 ```bash
 sudo mcpd start
 sudo mcpd restart
+mcpd update --check
+sudo mcpd update
 mcpd status
 mcpd logs --lines 200
 mcpd logs --follow
@@ -26,6 +28,8 @@ sudo mcpd stop
 ```
 
 `mcpd doctor` checks the installed configuration and service-facing dependencies.
+
+`mcpd update --check` compares the installed version with the latest stable GitHub release without changing the host. `sudo mcpd update` downloads the matching Linux release archive, verifies its SHA-256 checksum, atomically replaces the installed binary, restarts only the main daemon, and waits for the local `/healthz` endpoint. The durable supervisor is kept running. If the new daemon fails to restart or become healthy, MCPD restores the previous binary and restarts the main service again. Use `--force` only when intentionally reinstalling the latest release or replacing a locally newer build.
 
 ## Operational logs
 

@@ -47,6 +47,8 @@ func run(args []string) error {
 		return stopCommand(args[1:])
 	case "restart":
 		return restartCommand(args[1:])
+	case "update":
+		return updateCommand(args[1:])
 	case "status":
 		return statusCommand(args[1:])
 	case "logs":
@@ -255,6 +257,7 @@ Usage:
   mcpd setup [--domain HOST] [--https-ready] [--yes] [--reconfigure]
   mcpd install [--user USER] [--config PATH] [--no-enable] [--no-start]
   mcpd start | stop | restart | status
+  mcpd update [--check] [--force]
   mcpd logs [--follow] [--lines N] [--since TIME]
   mcpd doctor [--config PATH] [--json]
   mcpd auth set-password [--config PATH] [--password-stdin]
