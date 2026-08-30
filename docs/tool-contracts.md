@@ -14,6 +14,7 @@ fields such as `origin`.
 | `start_process` | implemented |
 | `read_process_output` | implemented |
 | `interact_with_process` | implemented |
+| `resize_process_pty` | implemented |
 | `force_terminate` | implemented |
 | `list_sessions` | implemented |
 | `list_processes` | implemented |
@@ -51,7 +52,7 @@ fields such as `origin`.
 | `get_usage_stats` | planned |
 | `get_recent_tool_calls` | planned |
 
-Total target: **24 MCP tools**.
+Total target: **25 MCP tools**.
 
 Desktop Commander-specific feedback, prompts, UI telemetry, and `node:local`
 virtual-session behavior are intentionally outside the compatibility target.
@@ -86,7 +87,8 @@ client can understand the server and initiate linking before a tool executes.
   "timeout_ms": "integer, required",
   "shell": "string, optional",
   "verbose_timing": "boolean, optional",
-  "pty": "auto | always | never, optional mcpd extension"
+  "pty": "auto | always | never, optional mcpd extension",
+  "separate_streams": "boolean, optional; non-PTY stdout/stderr tagging"
 }
 ```
 
@@ -101,6 +103,7 @@ Semantics:
 - The returned `pid` is the real OS PID and is the explicit resource handle.
 - Initial process output is capped by `process.initial_output_lines` (default 200) even when more output is retained server-side.
 - The result includes `read_from`, `read_count`, `total_lines`, `remaining`, and `evicted_lines` so callers can detect truncated initial output and continue with `read_process_output`.
+- `separate_streams=true` is only meaningful for non-PTY commands. Those sessions return `streams` records with `stdout`/`stderr` identity instead of duplicating the same source text in merged `output`/`lines`. PTYs remain a single terminal stream by definition.
 
 ### `read_process_output`
 
@@ -120,8 +123,7 @@ Offset semantics:
 - positive: absolute retained line position; cursor unchanged.
 - negative: start relative to the end, then read `length`; cursor unchanged.
 
-Returned structure includes PID, process state, exit code, lines, read range,
-total line count, remaining lines, evicted lines, prompt state, and runtime.
+Returned structure includes PID, process state, exit code, read range, total line count, remaining lines, evicted lines, prompt state, runtime, and an output `generation`. For `offset=0`, any new output bytes increment the generation; if a progress/status line changes without increasing the line count, `latest_line` exposes the updated line so callers do not sleep through `\r`/partial-line progress. Sessions created with `separate_streams=true` return stream-tagged `streams` records instead of merged `lines`.
 
 ### `interact_with_process`
 
@@ -131,13 +133,24 @@ total line count, remaining lines, evicted lines, prompt state, and runtime.
   "input": "string, required",
   "timeout_ms": "integer, optional; default 8000",
   "wait_for_prompt": "boolean, optional; default true",
-  "verbose_timing": "boolean, optional"
+  "verbose_timing": "boolean, optional",
+  "raw_input": "boolean, optional; default false"
 }
 ```
 
-A newline is appended when absent. When `wait_for_prompt` is true, the call
-returns when another prompt is detected, the process exits, or timeout elapses.
-Only output produced after the input snapshot is returned.
+A newline is appended when absent by default. Set `raw_input=true` to write the exact input bytes without adding a newline, which is useful for control-oriented terminal protocols and programs that read fixed byte counts. When `wait_for_prompt` is true, the call returns when another prompt is detected, the process exits, or timeout elapses. Only output produced after the input snapshot is returned.
+
+### `resize_process_pty`
+
+```json
+{
+  "pid": "integer, required",
+  "rows": "integer, required; 1..65535",
+  "cols": "integer, required; 1..65535"
+}
+```
+
+Resizes a running MCPD-managed PTY using the native terminal ioctl. Non-PTY sessions and exited processes are rejected.
 
 ### `force_terminate`
 

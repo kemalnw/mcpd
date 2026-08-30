@@ -74,9 +74,10 @@ sessions.
 
 | Tool | Status | Notes |
 | --- | --- | --- |
-| `start_process` | ✅ | wait timeout does not kill long-running processes; PTY `auto/always/never` extension |
-| `read_process_output` | ✅ | cursor, absolute-offset, and tail pagination |
-| `interact_with_process` | ✅ | interactive stdin with prompt-aware waiting |
+| `start_process` | ✅ | wait timeout does not kill long-running processes; PTY `auto/always/never`; optional stdout/stderr separation |
+| `read_process_output` | ✅ | cursor/absolute/tail pagination plus same-line output generations |
+| `interact_with_process` | ✅ | interactive stdin with prompt-aware waiting; optional raw input |
+| `resize_process_pty` | ✅ | resize running PTY rows/columns |
 | `force_terminate` | ✅ | SIGINT followed by SIGKILL escalation |
 | `list_sessions` | ✅ | active and retained completed sessions |
 | `list_processes` | ✅ | Linux process inventory via `ps` |

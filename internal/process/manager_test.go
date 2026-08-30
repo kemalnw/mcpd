@@ -3,6 +3,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 func testManager(t *testing.T) *Manager {
@@ -307,5 +310,116 @@ func TestCompletedSessionRetention(t *testing.T) {
 	}
 	if _, err := m.get(two.PID); err != nil {
 		t.Fatalf("new completed session should be retained: %v", err)
+	}
+}
+
+func TestReadOutputObservesPartialLineGeneration(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{
+		Command: "printf 'phase1'; sleep 0.4; printf ' phase2'; sleep 10", TimeoutMS: 150, PTY: PTYNever,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Output, "") != "phase1" {
+		t.Fatalf("unexpected initial partial output: %+v", result)
+	}
+	update, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update.ReadCount != 0 || update.LatestLine == nil || update.LatestLine.Text != "phase1 phase2" || update.Generation == 0 {
+		t.Fatalf("partial-line update was not observable: %+v", update)
+	}
+	if err := m.ForceTerminate(result.PID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRawInputDoesNotAppendNewline(t *testing.T) {
+	var buf bytes.Buffer
+	s := &session{stdin: &buf, state: StateRunning, notify: make(chan struct{})}
+	if err := s.write("abc", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); got != "abc" {
+		t.Fatalf("raw input = %q, want exact bytes", got)
+	}
+	buf.Reset()
+	if err := s.write("abc", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); got != "abc\n" {
+		t.Fatalf("default input = %q, want newline", got)
+	}
+}
+
+func TestSeparateStreamsOptIn(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{
+		Command: "printf 'out\\n'; printf 'err\\n' >&2", TimeoutMS: 1000, PTY: PTYNever, SeparateStreams: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Output) != 0 || len(result.Streams) != 2 {
+		t.Fatalf("unexpected separated output: %+v", result)
+	}
+	seen := map[string]string{}
+	for _, line := range result.Streams {
+		seen[line.Stream] = line.Text
+	}
+	if seen["stdout"] != "out" || seen["stderr"] != "err" {
+		t.Fatalf("stream identity lost: %+v", result.Streams)
+	}
+}
+
+func TestResizePTYChangesTerminalSize(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{Command: "sleep 10", TimeoutMS: 50, PTY: PTYAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resized, err := m.ResizePTY(result.PID, 55, 132)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resized.Rows != 55 || resized.Cols != 132 {
+		t.Fatalf("unexpected resize result: %+v", resized)
+	}
+	s, err := m.get(result.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	ptmx := s.ptyFile
+	if ptmx == nil {
+		s.mu.Unlock()
+		t.Fatal("PTY closed before size verification")
+	}
+	rows, cols, err := pty.Getsize(ptmx)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows != 55 || cols != 132 {
+		t.Fatalf("PTY size = %dx%d, want 55x132", rows, cols)
+	}
+	if err := m.ForceTerminate(result.PID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResizePTYRejectsNonPTYSession(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{Command: "sleep 10", TimeoutMS: 50, PTY: PTYNever})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ResizePTY(result.PID, 24, 80); err == nil || !strings.Contains(err.Error(), "not a PTY") {
+		t.Fatalf("non-PTY resize error = %v", err)
+	}
+	if err := m.ForceTerminate(result.PID); err != nil {
+		t.Fatal(err)
 	}
 }
