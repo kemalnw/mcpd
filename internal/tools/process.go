@@ -206,9 +206,9 @@ func audited[In, Out any](store *audit.Store, name string, fn func(context.Conte
 		out, err := fn(ctx, in)
 		durationMS := time.Since(started).Milliseconds()
 		if store != nil {
-			event := audit.Event{ID: eventID, Timestamp: started.UTC(), Tool: name, Arguments: in, DurationMS: durationMS}
+			event := audit.Event{ID: eventID, Timestamp: started.UTC(), Tool: name, Arguments: auditMetadata(any(in)), DurationMS: durationMS}
 			if err != nil {
-				event.Error = err.Error()
+				event.Error = "tool call failed"
 			}
 			if auditErr := store.Record(event); auditErr != nil && err == nil {
 				err = fmt.Errorf("record audit event: %w", auditErr)

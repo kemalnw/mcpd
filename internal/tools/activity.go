@@ -2,14 +2,17 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 
 	processmgr "github.com/kemalnw/mcpd/internal/process"
 )
 
 const (
-	maxCommandLogBytes  = 4096
 	maxMetadataLogBytes = 1024
 	maxPathPreviewItems = 5
 )
@@ -38,7 +41,11 @@ func logToolResult[Out any](ctx context.Context, eventID, name string, out Out, 
 	}
 	attrs = append(attrs, toolOutputAttrs(any(out))...)
 	if err != nil {
-		attrs = append(attrs, slog.String("error", truncateLogString(err.Error(), maxMetadataLogBytes)))
+		attrs = append(attrs,
+			slog.Int("error_bytes", len(err.Error())),
+			slog.String("error_sha256", auditDigest(err.Error())),
+			slog.String("error_type", fmt.Sprintf("%T", err)),
+		)
 	}
 	slog.Default().LogAttrs(ctx, level, "mcp tool result", attrs...)
 }
@@ -46,8 +53,8 @@ func logToolResult[Out any](ctx context.Context, eventID, name string, out Out, 
 func toolInputAttrs(in any) []slog.Attr {
 	switch v := in.(type) {
 	case StartProcessInput:
-		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS)}
-		attrs = appendLogString(attrs, "command", v.Command, maxCommandLogBytes)
+		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS), slog.Int("command_bytes", len(v.Command))}
+		attrs = appendLogString(attrs, "command_sha256", auditDigest(v.Command), maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "cwd", v.CWD, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "pty_mode", v.PTY, maxMetadataLogBytes)
@@ -73,7 +80,11 @@ func toolInputAttrs(in any) []slog.Attr {
 		return []slog.Attr{slog.Int("pid", v.PID)}
 	case ReadFileInput:
 		attrs := []slog.Attr{slog.Bool("is_url", v.IsURL), slog.Int("offset", v.Offset), slog.Int("length", v.Length)}
-		attrs = appendLogString(attrs, "path", v.Path, maxMetadataLogBytes)
+		path := v.Path
+		if v.IsURL {
+			path = safeURLForLog(v.Path)
+		}
+		attrs = appendLogString(attrs, "path", path, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "sheet", v.Sheet, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "range", v.Range, maxMetadataLogBytes)
 		return attrs
@@ -117,9 +128,9 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
 		return appendLogString(attrs, "job_id", v.JobID, maxMetadataLogBytes)
 	case StartSearchInput:
-		attrs := []slog.Attr{slog.Int("max_results", v.MaxResults), slog.Bool("include_hidden", v.IncludeHidden), slog.Int("timeout_ms", v.TimeoutMS)}
+		attrs := []slog.Attr{slog.Int("max_results", v.MaxResults), slog.Bool("include_hidden", v.IncludeHidden), slog.Int("timeout_ms", v.TimeoutMS), slog.Int("pattern_bytes", len(v.Pattern))}
 		attrs = appendLogString(attrs, "path", v.Path, maxMetadataLogBytes)
-		attrs = appendLogString(attrs, "pattern", v.Pattern, maxMetadataLogBytes)
+		attrs = appendLogString(attrs, "pattern_sha256", auditDigest(v.Pattern), maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "path_hint", v.PathHint, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "search_type", v.SearchType, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "file_pattern", v.FilePattern, maxMetadataLogBytes)
@@ -196,6 +207,22 @@ func truncateLogString(value string, limit int) string {
 	return value[:limit] + " [truncated]"
 }
 
+func auditDigest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func safeURLForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[invalid-url sha256:" + auditDigest(raw) + "]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 func lineCount(value string) int {
 	if value == "" {
 		return 0
@@ -205,4 +232,39 @@ func lineCount(value string) int {
 		lines++
 	}
 	return lines
+}
+
+// auditMetadata converts the already-curated activity attributes into a small
+// JSON-safe map. This deliberately avoids serializing typed tool inputs: those
+// inputs can contain commands, stdin, file bodies, search secrets, tokens, or
+// other user content that does not belong in durable audit persistence.
+func auditMetadata(in any) map[string]any {
+	attrs := toolInputAttrs(in)
+	if len(attrs) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(attrs))
+	for _, attr := range attrs {
+		value := attr.Value.Resolve()
+		switch value.Kind() {
+		case slog.KindString:
+			out[attr.Key] = value.String()
+		case slog.KindInt64:
+			out[attr.Key] = value.Int64()
+		case slog.KindUint64:
+			out[attr.Key] = value.Uint64()
+		case slog.KindFloat64:
+			out[attr.Key] = value.Float64()
+		case slog.KindBool:
+			out[attr.Key] = value.Bool()
+		case slog.KindDuration:
+			out[attr.Key] = value.Duration().String()
+		case slog.KindTime:
+			out[attr.Key] = value.Time().UTC()
+		default:
+			// Any-valued metadata is intentionally omitted from durable audit.
+			// This prevents a future preview/object from bypassing data minimization.
+		}
+	}
+	return out
 }
