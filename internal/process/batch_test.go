@@ -18,11 +18,12 @@ func batchTestManager(t *testing.T, maxParallel int) *Manager {
 	m, err := NewManager(Options{
 		DefaultShell: "/bin/bash", DefaultWaitMS: 100, InitialOutputLines: 20,
 		OutputBufferBytes: 1 << 20, MaxLineBytes: 1 << 16, CompletedSessions: 20,
-		BatchMaxParallel: maxParallel,
+		BatchMaxParallel: maxParallel, BatchGlobalParallel: maxParallel,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.resourceProbe = func() HostResources { return HostResources{CPUs: 8, MemoryAvailableB: 8 << 30} }
 	t.Cleanup(func() { _ = m.Close() })
 	return m
 }
@@ -326,10 +327,11 @@ func TestBatchCursorContinuesRemainingOutputWithoutNewGeneration(t *testing.T) {
 }
 
 func TestBatchCursorReportsEvictedHistory(t *testing.T) {
-	m, err := NewManager(Options{DefaultShell: "/bin/bash", DefaultWaitMS: 50, InitialOutputLines: 20, OutputBufferBytes: 64, MaxLineBytes: 1 << 16, CompletedSessions: 20, BatchMaxParallel: 2})
+	m, err := NewManager(Options{DefaultShell: "/bin/bash", DefaultWaitMS: 50, InitialOutputLines: 20, OutputBufferBytes: 64, MaxLineBytes: 1 << 16, CompletedSessions: 20, BatchMaxParallel: 2, BatchGlobalParallel: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.resourceProbe = func() HostResources { return HostResources{CPUs: 8, MemoryAvailableB: 8 << 30} }
 	t.Cleanup(func() { _ = m.Close() })
 	root := t.TempDir()
 	cmd := "while [ ! -f release ]; do sleep 0.01; done; for i in $(seq 1 30); do printf 'line-%02d-xxxxxxxx\\n' \"$i\"; done"
