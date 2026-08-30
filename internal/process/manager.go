@@ -20,13 +20,14 @@ import (
 const defaultInitialOutputLines = 200
 
 type Options struct {
-	DefaultShell       string
-	DefaultWaitMS      int
-	InitialOutputLines int
-	OutputBufferBytes  int
-	MaxLineBytes       int
-	CompletedSessions  int
-	BatchMaxParallel   int
+	DefaultShell        string
+	DefaultWaitMS       int
+	InitialOutputLines  int
+	OutputBufferBytes   int
+	MaxLineBytes        int
+	CompletedSessions   int
+	BatchMaxParallel    int
+	BatchGlobalParallel int
 }
 
 type Manager struct {
@@ -39,6 +40,8 @@ type Manager struct {
 	batchMu          sync.Mutex
 	batches          map[string]*processBatch
 	completedBatches []string
+	globalLimiter    *weightedLimiter
+	resourceProbe    func() HostResources
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -51,10 +54,14 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.BatchMaxParallel == 0 {
 		opts.BatchMaxParallel = 4
 	}
-	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 {
+	resources := hostResources()
+	if opts.BatchGlobalParallel == 0 {
+		opts.BatchGlobalParallel = recommendedGlobalParallel(resources)
+	}
+	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 || opts.BatchGlobalParallel <= 0 {
 		return nil, errors.New("invalid process manager limits")
 	}
-	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), opts: opts, signalGroup: signalProcessGroup}, nil
+	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), opts: opts, signalGroup: signalProcessGroup, globalLimiter: newWeightedLimiter(opts.BatchGlobalParallel), resourceProbe: hostResources}, nil
 }
 
 func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, error) {

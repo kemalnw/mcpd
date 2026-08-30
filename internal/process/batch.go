@@ -46,6 +46,7 @@ type BatchJobRequest struct {
 	PTY             PTYMode
 	SeparateStreams bool
 	DependsOn       []string
+	ResourceClass   ResourceClass
 }
 
 type BatchStartRequest struct {
@@ -100,6 +101,7 @@ type BatchResult struct {
 	Counts      BatchCounts      `json:"counts"`
 	Jobs        []BatchJobResult `json:"jobs,omitempty"`
 	Cursor      string           `json:"cursor"`
+	Resources   HostResources    `json:"resources"`
 }
 
 type BatchCancelResult struct {
@@ -118,6 +120,7 @@ type processBatch struct {
 	jobs        []*batchJob
 	byID        map[string]*batchJob
 	notify      chan struct{}
+	cancelCh    chan struct{}
 }
 
 type batchJob struct {
@@ -177,6 +180,9 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 		if strings.TrimSpace(jobReq.Command) == "" {
 			return BatchResult{}, fmt.Errorf("batch job %q command is required", jobReq.ID)
 		}
+		if !validResourceClass(jobReq.ResourceClass) {
+			return BatchResult{}, fmt.Errorf("batch job %q has invalid resource class %q", jobReq.ID, jobReq.ResourceClass)
+		}
 		if jobReq.PTY == PTYAlways {
 			return BatchResult{}, fmt.Errorf("batch job %q requests PTY=always; interactive PTY jobs must use start_process", jobReq.ID)
 		}
@@ -191,7 +197,7 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 	}
 	b := &processBatch{
 		id: id, maxParallel: maxParallel, createdAt: time.Now().UTC(), state: BatchRunning,
-		jobs: jobs, byID: make(map[string]*batchJob, len(jobs)), notify: make(chan struct{}),
+		jobs: jobs, byID: make(map[string]*batchJob, len(jobs)), notify: make(chan struct{}), cancelCh: make(chan struct{}),
 	}
 	for _, job := range jobs {
 		b.byID[job.req.ID] = job
@@ -265,6 +271,7 @@ func (m *Manager) CancelBatch(batchID string) (BatchCancelResult, error) {
 		return BatchCancelResult{BatchID: batchID, State: state}, nil
 	}
 	b.canceled = true
+	close(b.cancelCh)
 	b.state = BatchCanceled
 	pids := make([]int, 0, len(b.jobs))
 	canceled := 0
@@ -451,6 +458,23 @@ func validateBatchDAG(jobs []*batchJob) error {
 }
 
 func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
+	resources := m.resourceProbe()
+	weight := resourceWeight(job.req.ResourceClass, resources, m.globalLimiter.capacity)
+	if !m.globalLimiter.Acquire(weight, b.cancelCh) {
+		m.batchMu.Lock()
+		job.state = BatchJobCanceled
+		job.changeGeneration++
+		m.bumpBatchLocked(b)
+		m.batchMu.Unlock()
+		return
+	}
+	defer m.globalLimiter.Release(weight)
+	m.batchMu.Lock()
+	canceled := b.canceled
+	m.batchMu.Unlock()
+	if canceled {
+		return
+	}
 	s, err := m.startSession(job.req.Command, job.req.CWD, job.req.Shell, job.req.PTY, job.req.SeparateStreams)
 	if err != nil {
 		m.batchMu.Lock()
@@ -569,13 +593,17 @@ func (m *Manager) batchCursorHasUnreadLocked(b *processBatch, cursor batchCursor
 }
 
 func (m *Manager) readBatchSnapshot(b *processBatch, onlyChanged bool, length int, cursor batchCursor) BatchResult {
+	// Host probing may touch /proc; never do filesystem I/O while holding the
+	// scheduler lock used for batch state transitions.
+	resources := m.resourceProbe()
+	resources.GlobalParallelCap = m.globalLimiter.capacity
 	m.batchMu.Lock()
 	defer m.batchMu.Unlock()
 	if cursor.Jobs == nil {
 		cursor.Jobs = make(map[string]batchJobCursor, len(b.jobs))
 	}
 	nextJobs := make(map[string]batchJobCursor, len(b.jobs))
-	result := BatchResult{BatchID: b.id, State: b.state, Generation: b.generation, MaxParallel: b.maxParallel}
+	result := BatchResult{BatchID: b.id, State: b.state, Generation: b.generation, MaxParallel: b.maxParallel, Resources: resources}
 	for _, job := range b.jobs {
 		result.Counts.add(job.state)
 		state := cursor.Jobs[job.req.ID]
