@@ -11,7 +11,7 @@ import (
 // CatalogVersion must be incremented whenever a model-facing MCP tool name,
 // input/output contract, or tool-selection semantic changes. It lets operators
 // distinguish a stale client-side tools/list cache from an old MCPD binary.
-const CatalogVersion = 9
+const CatalogVersion = 10
 
 func CatalogFingerprint() string {
 	names := make([]string, 0, len(toolScopes))

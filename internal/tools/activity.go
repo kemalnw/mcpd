@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	durablemgr "github.com/kemalnw/mcpd/internal/durableexec"
 	processmgr "github.com/kemalnw/mcpd/internal/process"
 )
 
@@ -52,6 +53,16 @@ func logToolResult[Out any](ctx context.Context, eventID, name string, out Out, 
 
 func toolInputAttrs(in any) []slog.Attr {
 	switch v := in.(type) {
+	case StartDurableJobInput:
+		attrs := []slog.Attr{slog.Int("command_bytes", len(v.Command)), slog.String("command_sha256", auditDigest(v.Command)), slog.Bool("has_idempotency_key", strings.TrimSpace(v.IdempotencyKey) != "")}
+		attrs = appendLogString(attrs, "cwd", v.CWD, maxMetadataLogBytes)
+		return appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
+	case DurableJobInput:
+		return appendLogString(nil, "durable_job_id", v.JobID, maxMetadataLogBytes)
+	case ListDurableJobsInput:
+		return []slog.Attr{slog.Int("offset", v.Offset), slog.Int("limit", v.Limit)}
+	case ReadDurableJobLogInput:
+		return append(appendLogString(nil, "durable_job_id", v.JobID, maxMetadataLogBytes), slog.Int("max_bytes", v.MaxBytes))
 	case StartProcessInput:
 		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS), slog.Int("command_bytes", len(v.Command))}
 		attrs = appendLogString(attrs, "command_sha256", auditDigest(v.Command), maxMetadataLogBytes)
@@ -165,6 +176,15 @@ func toolInputAttrs(in any) []slog.Attr {
 
 func toolOutputAttrs(out any) []slog.Attr {
 	switch v := out.(type) {
+	case StartDurableJobOutput:
+		return []slog.Attr{slog.String("durable_job_id", v.Job.ID), slog.String("durable_job_state", string(v.Job.State)), slog.Bool("idempotent_replay", v.IdempotentReplay)}
+	case DurableJobView:
+		attrs := []slog.Attr{slog.String("durable_job_id", v.ID), slog.String("durable_job_state", string(v.State)), slog.Int("runner_pid", v.RunnerPID), slog.Int("child_pid", v.ChildPID)}
+		return appendExitCode(attrs, v.ExitCode)
+	case ListDurableJobsOutput:
+		return []slog.Attr{slog.Int("returned", v.Returned), slog.Int("total", v.Total), slog.Bool("more", v.More)}
+	case durablemgr.LogTail:
+		return []slog.Attr{slog.String("durable_job_id", v.JobID), slog.Int("bytes_returned", v.BytesReturned), slog.Int64("total_bytes", v.TotalBytes), slog.Bool("truncated", v.Truncated)}
 	case processmgr.StartResult:
 		attrs := []slog.Attr{
 			slog.Int("pid", v.PID),

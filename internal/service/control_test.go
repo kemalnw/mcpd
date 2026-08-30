@@ -49,10 +49,11 @@ func TestLifecycleCommandsUseSystemdAndJournal(t *testing.T) {
 	}
 	got := string(data)
 	for _, want := range []string{
+		"systemctl start mcpd-durable.service",
 		"systemctl start mcpd.service",
 		"systemctl restart mcpd.service",
-		"systemctl status --no-pager mcpd.service",
-		"journalctl -u mcpd.service -n 7 --since 1 hour ago --no-pager",
+		"systemctl status --no-pager mcpd.service mcpd-durable.service",
+		"journalctl -u mcpd.service -u mcpd-durable.service -n 7 --since 1 hour ago --no-pager",
 		"systemctl stop mcpd.service",
 	} {
 		if !strings.Contains(got, want) {

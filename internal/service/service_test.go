@@ -16,14 +16,14 @@ func TestSystemDefaultConfigIsLocalAndUsesSystemState(t *testing.T) {
 	if cfg.Server.Listen != "127.0.0.1:31354" {
 		t.Fatalf("listen=%q", cfg.Server.Listen)
 	}
-	if cfg.Audit.Path != "/var/lib/mcpd/audit.jsonl" || cfg.Auth.StateDir != "/var/lib/mcpd/auth" {
+	if cfg.Audit.Path != "/var/lib/mcpd/audit.jsonl" || cfg.Auth.StateDir != "/var/lib/mcpd/auth" || cfg.Workflow.StateDir != "/var/lib/mcpd/runs" {
 		t.Fatalf("unexpected system state paths: %#v", cfg)
 	}
 }
 
 func TestRenderServiceIsSingleUnprivilegedUnit(t *testing.T) {
 	unit := RenderService(Account{User: "alice", Group: "alice", Home: "/home/alice", UID: 1000, GID: 1000})
-	for _, want := range []string{"User=alice", "StateDirectory=mcpd", "ExecStart=/usr/local/bin/mcpd serve --config /etc/mcpd/config.toml"} {
+	for _, want := range []string{"User=alice", "StateDirectory=mcpd", "ExecStart=/usr/local/bin/mcpd serve --config /etc/mcpd/config.toml", "Wants=network-online.target mcpd-durable.service"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
@@ -32,6 +32,18 @@ func TestRenderServiceIsSingleUnprivilegedUnit(t *testing.T) {
 		if strings.Contains(unit, forbidden) {
 			t.Fatalf("unit contains removed/privileged feature %q:\n%s", forbidden, unit)
 		}
+	}
+}
+
+func TestRenderDurableServiceUsesSeparateLifecycle(t *testing.T) {
+	unit := RenderDurableService(Account{User: "alice", Group: "alice", Home: "/home/alice", UID: 1000, GID: 1000})
+	for _, want := range []string{"User=alice", "StateDirectory=mcpd", "ExecStart=/usr/local/bin/mcpd __durable_supervisor --config /etc/mcpd/config.toml", "Restart=on-failure"} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("durable unit missing %q:\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "KillMode=process") {
+		t.Fatalf("durable unit must retain control-group cleanup:\n%s", unit)
 	}
 }
 
@@ -95,18 +107,27 @@ func TestStagedInstallRemovesLegacySocketAndServiceVerifies(t *testing.T) {
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
 		t.Fatalf("legacy socket unit still exists: %v", err)
 	}
-	serviceData, err := os.ReadFile(result.Paths.ServiceUnit)
+	for _, item := range []struct{ source, name string }{{result.Paths.ServiceUnit, "mcpd.service"}, {result.Paths.DurableServiceUnit, "mcpd-durable.service"}} {
+		serviceData, err := os.ReadFile(item.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serviceData = []byte(strings.ReplaceAll(string(serviceData), BinaryPath, "/bin/true"))
+		verifyService := filepath.Join(t.TempDir(), item.name)
+		if err := os.WriteFile(verifyService, serviceData, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("systemd-analyze", "verify", verifyService)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("systemd-analyze verify %s failed: %v\n%s", item.name, err, output)
+		}
+	}
+	installedConfig, err := os.ReadFile(result.Paths.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	serviceData = []byte(strings.Replace(string(serviceData), BinaryPath, "/bin/true", 1))
-	verifyService := filepath.Join(t.TempDir(), "mcpd.service")
-	if err := os.WriteFile(verifyService, serviceData, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("systemd-analyze", "verify", verifyService)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("systemd-analyze verify failed: %v\n%s", err, output)
+	if strings.Contains(string(installedConfig), "/root/") {
+		t.Fatalf("staged system config leaked installer home path:\n%s", installedConfig)
 	}
 }
 

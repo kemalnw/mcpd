@@ -36,6 +36,11 @@ var toolScopes = map[string]string{
 	"read_run_job_log":        ScopeRead,
 	"handoff_run":             ScopeWrite,
 	"resume_run":              ScopeRead,
+	"start_durable_job":       ScopeWrite,
+	"get_durable_job":         ScopeRead,
+	"list_durable_jobs":       ScopeRead,
+	"read_durable_job_log":    ScopeRead,
+	"cancel_durable_job":      ScopeWrite,
 }
 
 func RequiredScope(toolName string) string {
