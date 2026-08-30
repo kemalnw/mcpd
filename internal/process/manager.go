@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"sync"
 	"syscall"
@@ -65,11 +66,16 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	if err != nil {
 		return StartResult{}, err
 	}
+	cwd, err := resolveCWD(req.CWD)
+	if err != nil {
+		return StartResult{}, err
+	}
 
 	cmd := exec.Command(shell, "-l", "-c", req.Command)
+	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
-	s, err := m.startCommand(cmd, req.Command, shell, usePTY)
+	s, err := m.startCommand(cmd, req.Command, cwd, shell, usePTY)
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -81,7 +87,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	info := s.snapshot()
 	page := m.readInitialOutput(s)
 	return StartResult{
-		PID: info.PID, Command: info.Command, Shell: info.Shell, PTY: info.PTY,
+		PID: info.PID, Command: info.Command, CWD: info.CWD, Shell: info.Shell, PTY: info.PTY,
 		State: info.State, StartedAt: info.StartedAt, ExitCode: info.ExitCode,
 		Output: page.Lines, ReadFrom: page.ReadFrom, ReadCount: page.ReadCount,
 		TotalLines: page.TotalLines, Remaining: page.Remaining, EvictedLines: page.EvictedLines,
@@ -89,13 +95,34 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	}, nil
 }
 
-func (m *Manager) startCommand(cmd *exec.Cmd, command, shell string, usePTY bool) (*session, error) {
+func resolveCWD(cwd string) (string, error) {
+	if cwd == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolve cwd %q: %w", cwd, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("cwd %q does not exist", cwd)
+		}
+		return "", fmt.Errorf("stat cwd %q: %w", cwd, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("cwd %q is not a directory", cwd)
+	}
+	return abs, nil
+}
+
+func (m *Manager) startCommand(cmd *exec.Cmd, command, cwd, shell string, usePTY bool) (*session, error) {
 	if usePTY {
 		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
 		if err != nil {
 			return nil, fmt.Errorf("start PTY process: %w", err)
 		}
-		s := newSession(cmd, ptmx, ptmx, command, shell, true, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
+		s := newSession(cmd, ptmx, ptmx, command, cwd, shell, true, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
 		s.pid = cmd.Process.Pid
 		s.captureWG.Add(1)
 		go m.capture(s, ptmx)
@@ -107,7 +134,7 @@ func (m *Manager) startCommand(cmd *exec.Cmd, command, shell string, usePTY bool
 	if err != nil {
 		return nil, fmt.Errorf("create stdin pipe: %w", err)
 	}
-	s := newSession(cmd, stdin, stdin, command, shell, false, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
+	s := newSession(cmd, stdin, stdin, command, cwd, shell, false, m.opts.OutputBufferBytes, m.opts.MaxLineBytes)
 	// Assign writers directly instead of using StdoutPipe/StderrPipe. os/exec then
 	// owns the copy goroutines and Cmd.Wait does not return until their final bytes
 	// are delivered to sessionWriter. This avoids the documented Wait-vs-Read race

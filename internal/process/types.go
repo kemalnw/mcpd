@@ -12,6 +12,7 @@ const (
 
 type StartRequest struct {
 	Command   string
+	CWD       string
 	Shell     string
 	TimeoutMS int
 	PTY       PTYMode
@@ -20,6 +21,7 @@ type StartRequest struct {
 type StartResult struct {
 	PID             int       `json:"pid"`
 	Command         string    `json:"command"`
+	CWD             string    `json:"cwd,omitempty"`
 	Shell           string    `json:"shell"`
 	PTY             bool      `json:"pty"`
 	State           State     `json:"state"`
@@ -75,6 +77,7 @@ type InteractResult struct {
 type SessionInfo struct {
 	PID             int       `json:"pid"`
 	Command         string    `json:"command"`
+	CWD             string    `json:"cwd,omitempty"`
 	Shell           string    `json:"shell"`
 	PTY             bool      `json:"pty"`
 	State           State     `json:"state"`

@@ -102,8 +102,9 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 		}
 	}
 
+	processCWD := t.TempDir()
 	processResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: "start_process", Arguments: map[string]any{"command": "printf 'mcpd-e2e\\n'", "timeout_ms": 1000, "pty": "never"},
+		Name: "start_process", Arguments: map[string]any{"command": "printf 'mcpd-e2e\\n'", "cwd": processCWD, "timeout_ms": 1000, "pty": "never"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +114,9 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	processPID, ok := processStructured["pid"].(float64)
 	if !ok || processPID <= 0 {
 		t.Fatalf("start_process returned invalid pid: %#v", processStructured)
+	}
+	if processStructured["cwd"] != processCWD {
+		t.Fatalf("start_process did not preserve cwd: %#v", processStructured)
 	}
 	processDeadline := time.Now().Add(5 * time.Second)
 	for processStructured["state"] != "exited" {

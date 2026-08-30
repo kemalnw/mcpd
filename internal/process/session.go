@@ -17,6 +17,7 @@ type session struct {
 	closer  io.Closer
 	pid     int
 	command string
+	cwd     string
 	shell   string
 	usePTY  bool
 
@@ -43,10 +44,10 @@ type session struct {
 	notify    chan struct{}
 }
 
-func newSession(cmd *exec.Cmd, stdin io.Writer, closer io.Closer, command, shell string, usePTY bool, maxBytes, maxLineBytes int) *session {
+func newSession(cmd *exec.Cmd, stdin io.Writer, closer io.Closer, command, cwd, shell string, usePTY bool, maxBytes, maxLineBytes int) *session {
 	return &session{
 		cmd: cmd, stdin: stdin, closer: closer, pid: 0,
-		command: command, shell: shell, usePTY: usePTY,
+		command: command, cwd: cwd, shell: shell, usePTY: usePTY,
 		startedAt: time.Now().UTC(), state: StateRunning,
 		maxBytes: maxBytes, maxLineBytes: maxLineBytes,
 		done: make(chan struct{}), notify: make(chan struct{}),
@@ -173,7 +174,7 @@ func (s *session) snapshot() SessionInfo {
 		lines++
 	}
 	return SessionInfo{
-		PID: s.pid, Command: s.command, Shell: s.shell, PTY: s.usePTY,
+		PID: s.pid, Command: s.command, CWD: s.cwd, Shell: s.shell, PTY: s.usePTY,
 		State: s.state, StartedAt: s.startedAt, RuntimeMS: time.Since(s.startedAt).Milliseconds(),
 		ExitCode: cloneInt(s.exitCode), TotalLines: int(s.evictedLines) + lines,
 		EvictedLines: s.evictedLines, WaitingForInput: s.waitingForInput,

@@ -19,7 +19,7 @@ type ProcessTools struct {
 
 func RegisterProcess(server *mcp.Server, manager *processmgr.Manager, auditStore *audit.Store) {
 	t := &ProcessTools{manager: manager, audit: auditStore}
-	mcp.AddTool(server, tool("start_process", "Run a shell command", "Use this for shell commands, builds, tests, package managers, Git, service inspection, and other terminal work. Prefer dedicated MCPD file/search tools when the task only needs reading, listing, searching, or editing files. The call returns on process exit, an interactive prompt, or timeout_ms; a wait timeout never kills the process. Initial output is capped to the configured page size and reports read_from, read_count, total_lines, and remaining; continue the PID with read_process_output for additional retained or future output, or interact_with_process when input is required.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process", t.start))
+	mcp.AddTool(server, tool("start_process", "Run a shell command", "Use this for shell commands, builds, tests, package managers, Git, service inspection, and other terminal work. For repository-scoped work, pass cwd instead of embedding `cd <path> &&` in the command; this keeps commands shorter and avoids shell quoting around project paths. Prefer dedicated MCPD file/search tools when the task only needs reading, listing, searching, or editing files. The call returns on process exit, an interactive prompt, or timeout_ms; a wait timeout never kills the process. Initial output is capped to the configured page size and reports read_from, read_count, total_lines, and remaining; continue the PID with read_process_output for additional retained or future output, or interact_with_process when input is required.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process", t.start))
 	mcp.AddTool(server, tool("read_process_output", "Read command output", "Use this only for a PID returned by start_process. Read retained stdout/stderr and process state without starting another command. offset=0 reads new output from the session cursor; positive offsets read an absolute retained range; negative offsets read from the tail. Prefer this over starting a second shell command merely to inspect an existing MCPD process.", toolHints{readOnly: true}), audited(auditStore, "read_process_output", t.readOutput))
 	mcp.AddTool(server, tool("interact_with_process", "Send input to a command", "Use this only for an interactive PID returned by start_process when the process is waiting for stdin, a confirmation, password-free prompt, REPL input, or similar interaction. Do not use it for a new command; use start_process instead. A newline is appended when absent.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "interact_with_process", t.interact))
 	mcp.AddTool(server, tool("force_terminate", "Stop a managed command", "Use this to stop a process session created by start_process. It targets the managed process group, sends SIGINT first, and escalates to SIGKILL if needed. Prefer this over kill_process for MCPD-managed sessions because it handles the process group and cleanup correctly.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "force_terminate", t.forceTerminate))
@@ -30,6 +30,7 @@ func RegisterProcess(server *mcp.Server, manager *processmgr.Manager, auditStore
 
 type StartProcessInput struct {
 	Command       string `json:"command" jsonschema:"shell command to execute"`
+	CWD           string `json:"cwd,omitempty" jsonschema:"optional working directory for the command; prefer this over embedding cd in repository-scoped commands"`
 	TimeoutMS     int    `json:"timeout_ms" jsonschema:"maximum milliseconds this tool call waits before returning control; the process keeps running after the wait expires"`
 	Shell         string `json:"shell,omitempty" jsonschema:"optional shell executable; defaults to the configured shell"`
 	VerboseTiming bool   `json:"verbose_timing,omitempty" jsonschema:"accepted for Desktop Commander compatibility; timing fields are always returned in structured output"`
@@ -73,7 +74,7 @@ type ProcessesOutput struct {
 }
 
 func (t *ProcessTools) start(ctx context.Context, in StartProcessInput) (processmgr.StartResult, error) {
-	return t.manager.Start(ctx, processmgr.StartRequest{Command: in.Command, Shell: in.Shell, TimeoutMS: in.TimeoutMS, PTY: processmgr.PTYMode(in.PTY)})
+	return t.manager.Start(ctx, processmgr.StartRequest{Command: in.Command, CWD: in.CWD, Shell: in.Shell, TimeoutMS: in.TimeoutMS, PTY: processmgr.PTYMode(in.PTY)})
 }
 
 func (t *ProcessTools) readOutput(ctx context.Context, in ReadProcessOutputInput) (processmgr.OutputResult, error) {
