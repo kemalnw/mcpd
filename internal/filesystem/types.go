@@ -53,9 +53,10 @@ type MultiReadResult struct {
 }
 
 type WriteRequest struct {
-	Path    string
-	Content string
-	Mode    string
+	Path         string
+	Content      string
+	Mode         string
+	ExpectedSize *int64
 }
 
 type WriteResult struct {
@@ -63,6 +64,9 @@ type WriteResult struct {
 	Mode         string `json:"mode"`
 	BytesWritten int    `json:"bytes_written"`
 	LineCount    int    `json:"line_count"`
+	SizeBefore   int64  `json:"size_before"`
+	SizeAfter    int64  `json:"size_after"`
+	Replayed     bool   `json:"replayed,omitempty"`
 }
 
 type DirectoryEntry struct {

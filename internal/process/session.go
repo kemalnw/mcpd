@@ -13,16 +13,21 @@ import (
 type session struct {
 	mu sync.Mutex
 
-	cmd             *exec.Cmd
-	stdin           io.Writer
-	closer          io.Closer
-	pid             int
-	command         string
-	cwd             string
-	shell           string
-	usePTY          bool
-	separateStreams bool
-	ptyFile         *os.File
+	cmd                *exec.Cmd
+	stdin              io.Writer
+	closer             io.Closer
+	pid                int
+	command            string
+	cwd                string
+	shell              string
+	usePTY             bool
+	separateStreams    bool
+	ptyFile            *os.File
+	idempotencyKeyHash string
+
+	interactionMu      sync.Mutex
+	interactionRecords map[string]interactionReplayRecord
+	interactionOrder   []string
 
 	startedAt time.Time
 	state     State
@@ -58,7 +63,7 @@ func newSession(cmd *exec.Cmd, stdin io.Writer, closer io.Closer, command, cwd, 
 		command: command, cwd: cwd, shell: shell, usePTY: usePTY, separateStreams: separateStreams,
 		startedAt: time.Now().UTC(), state: StateRunning,
 		maxBytes: maxBytes, maxLineBytes: maxLineBytes,
-		done: make(chan struct{}), notify: make(chan struct{}),
+		done: make(chan struct{}), notify: make(chan struct{}), interactionRecords: make(map[string]interactionReplayRecord),
 	}
 }
 

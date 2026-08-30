@@ -17,6 +17,7 @@ type StartRequest struct {
 	TimeoutMS       int
 	PTY             PTYMode
 	SeparateStreams bool
+	IdempotencyKey  string
 }
 
 type StreamLine struct {
@@ -25,26 +26,27 @@ type StreamLine struct {
 }
 
 type StartResult struct {
-	PID             int          `json:"pid"`
-	Command         string       `json:"command"`
-	CWD             string       `json:"cwd,omitempty"`
-	Shell           string       `json:"shell"`
-	PTY             bool         `json:"pty"`
-	State           State        `json:"state"`
-	StartedAt       time.Time    `json:"started_at"`
-	ExitCode        *int         `json:"exit_code,omitempty"`
-	Output          []string     `json:"output,omitempty"`
-	Streams         []StreamLine `json:"streams,omitempty"`
-	ReadFrom        int          `json:"read_from"`
-	ReadCount       int          `json:"read_count"`
-	TotalLines      int          `json:"total_lines"`
-	Remaining       int          `json:"remaining"`
-	BytesReturned   int          `json:"bytes_returned"`
-	OutputTruncated bool         `json:"output_truncated,omitempty"`
-	OmittedBytes    int          `json:"omitted_bytes,omitempty"`
-	EvictedLines    int64        `json:"evicted_lines"`
-	WaitedMS        int64        `json:"waited_ms"`
-	WaitingForInput bool         `json:"waiting_for_input"`
+	PID              int          `json:"pid"`
+	Command          string       `json:"command"`
+	CWD              string       `json:"cwd,omitempty"`
+	Shell            string       `json:"shell"`
+	PTY              bool         `json:"pty"`
+	State            State        `json:"state"`
+	StartedAt        time.Time    `json:"started_at"`
+	ExitCode         *int         `json:"exit_code,omitempty"`
+	Output           []string     `json:"output,omitempty"`
+	Streams          []StreamLine `json:"streams,omitempty"`
+	ReadFrom         int          `json:"read_from"`
+	ReadCount        int          `json:"read_count"`
+	TotalLines       int          `json:"total_lines"`
+	Remaining        int          `json:"remaining"`
+	BytesReturned    int          `json:"bytes_returned"`
+	OutputTruncated  bool         `json:"output_truncated,omitempty"`
+	OmittedBytes     int          `json:"omitted_bytes,omitempty"`
+	EvictedLines     int64        `json:"evicted_lines"`
+	WaitedMS         int64        `json:"waited_ms"`
+	WaitingForInput  bool         `json:"waiting_for_input"`
+	IdempotentReplay bool         `json:"idempotent_replay,omitempty"`
 }
 
 type OutputRequest struct {
@@ -81,15 +83,17 @@ type InteractRequest struct {
 	TimeoutMS     int
 	WaitForPrompt bool
 	RawInput      bool
+	OperationKey  string
 }
 
 type InteractResult struct {
-	PID             int      `json:"pid"`
-	State           State    `json:"state"`
-	ExitCode        *int     `json:"exit_code,omitempty"`
-	Lines           []string `json:"lines,omitempty"`
-	WaitingForInput bool     `json:"waiting_for_input"`
-	RuntimeMS       int64    `json:"runtime_ms"`
+	PID              int      `json:"pid"`
+	State            State    `json:"state"`
+	ExitCode         *int     `json:"exit_code,omitempty"`
+	Lines            []string `json:"lines,omitempty"`
+	WaitingForInput  bool     `json:"waiting_for_input"`
+	RuntimeMS        int64    `json:"runtime_ms"`
+	IdempotentReplay bool     `json:"idempotent_replay,omitempty"`
 }
 
 type SessionInfo struct {
@@ -115,10 +119,11 @@ type PTYSizeResult struct {
 }
 
 type SystemProcess struct {
-	PID     int     `json:"pid"`
-	CPU     float64 `json:"cpu_percent"`
-	Memory  float64 `json:"memory_percent"`
-	Command string  `json:"command"`
+	PID        int     `json:"pid"`
+	StartTicks uint64  `json:"start_ticks,omitempty"`
+	CPU        float64 `json:"cpu_percent"`
+	Memory     float64 `json:"memory_percent"`
+	Command    string  `json:"command"`
 }
 
 type State string

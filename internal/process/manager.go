@@ -45,6 +45,9 @@ type Manager struct {
 	batchIdempotency map[string]batchIdempotencyRecord
 	globalLimiter    *weightedLimiter
 	resourceProbe    func() HostResources
+
+	startIdemMu      sync.Mutex
+	startIdempotency map[string]*startIdempotencyRecord
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -70,10 +73,74 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.InitialOutputLines < 0 || opts.ResponseOutputBytes <= 0 || opts.FailureTailLines <= 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 || opts.BatchGlobalParallel <= 0 {
 		return nil, errors.New("invalid process manager limits")
 	}
-	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), batchIdempotency: make(map[string]batchIdempotencyRecord), opts: opts, signalGroup: signalProcessGroup, globalLimiter: newWeightedLimiter(opts.BatchGlobalParallel), resourceProbe: hostResources}, nil
+	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), batchIdempotency: make(map[string]batchIdempotencyRecord), startIdempotency: make(map[string]*startIdempotencyRecord), opts: opts, signalGroup: signalProcessGroup, globalLimiter: newWeightedLimiter(opts.BatchGlobalParallel), resourceProbe: hostResources}, nil
 }
 
 func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, error) {
+	key := strings.TrimSpace(req.IdempotencyKey)
+	if err := validateProcessIdempotencyKey(key); err != nil {
+		return StartResult{}, err
+	}
+	if key == "" {
+		return m.startOnce(ctx, req)
+	}
+	fingerprint, err := startRequestFingerprint(req)
+	if err != nil {
+		return StartResult{}, err
+	}
+	keyHash := processIdempotencyKeyHash(key)
+
+	m.startIdemMu.Lock()
+	if existing := m.startIdempotency[keyHash]; existing != nil {
+		if existing.Fingerprint != fingerprint {
+			m.startIdemMu.Unlock()
+			return StartResult{}, ErrProcessIdempotencyConflict
+		}
+		done := existing.Done
+		m.startIdemMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return StartResult{}, ctx.Err()
+		case <-done:
+		}
+		if existing.Err != nil {
+			return StartResult{}, existing.Err
+		}
+		result := cloneStartResult(existing.Result)
+		result.IdempotentReplay = true
+		return result, nil
+	}
+	if len(m.startIdempotency) >= maxProcessIdempotencyRecords {
+		m.startIdemMu.Unlock()
+		return StartResult{}, fmt.Errorf("process idempotency record capacity %d reached", maxProcessIdempotencyRecords)
+	}
+	record := &startIdempotencyRecord{Fingerprint: fingerprint, Done: make(chan struct{})}
+	m.startIdempotency[keyHash] = record
+	m.startIdemMu.Unlock()
+
+	result, err := m.startOnce(ctx, req)
+	if err != nil {
+		m.startIdemMu.Lock()
+		record.Err = err
+		close(record.Done)
+		delete(m.startIdempotency, keyHash)
+		m.startIdemMu.Unlock()
+		return StartResult{}, err
+	}
+	if session, getErr := m.get(result.PID); getErr == nil {
+		session.mu.Lock()
+		session.idempotencyKeyHash = keyHash
+		session.mu.Unlock()
+	}
+	m.startIdemMu.Lock()
+	record.PID = result.PID
+	record.Result = cloneStartResult(result)
+	close(record.Done)
+	m.startIdemMu.Unlock()
+	return result, nil
+}
+
+func (m *Manager) startOnce(ctx context.Context, req StartRequest) (StartResult, error) {
 	waitMS := req.TimeoutMS
 	if waitMS == 0 {
 		waitMS = m.opts.DefaultWaitMS
