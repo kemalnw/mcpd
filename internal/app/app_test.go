@@ -49,6 +49,15 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	if init == nil || init.ProtocolVersion != "2026-07-28" {
 		t.Fatalf("protocol = %#v", init)
 	}
+	if init.ServerInfo == nil || init.ServerInfo.Name != "mcpd" || init.ServerInfo.Title != "MCPD" {
+		t.Fatalf("server info = %#v", init.ServerInfo)
+	}
+	if init.ServerInfo.Description == "" || init.ServerInfo.WebsiteURL != "https://github.com/kemalnw/mcpd" {
+		t.Fatalf("server metadata = %#v", init.ServerInfo)
+	}
+	if !strings.Contains(init.Instructions, "narrowest dedicated tool") || !strings.Contains(init.Instructions, "continue that PID") {
+		t.Fatalf("server instructions missing tool-selection guidance: %q", init.Instructions)
+	}
 	listed, err := session.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -60,11 +69,33 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 		"list_directory": false, "move_file": false, "get_file_info": false, "edit_block": false,
 		"start_search": false, "get_more_search_results": false, "stop_search": false, "list_searches": false,
 	}
+	byName := make(map[string]*mcp.Tool, len(listed.Tools))
 	for _, tool := range listed.Tools {
+		byName[tool.Name] = tool
 		if _, ok := required[tool.Name]; ok {
 			required[tool.Name] = true
 		}
 	}
+	assertToolHints := func(name string, readOnly, destructive, idempotent, openWorld bool) {
+		t.Helper()
+		tool := byName[name]
+		if tool == nil || tool.Annotations == nil {
+			t.Fatalf("tool %q missing annotations", name)
+		}
+		got := tool.Annotations
+		if got.DestructiveHint == nil || got.OpenWorldHint == nil || got.ReadOnlyHint != readOnly || *got.DestructiveHint != destructive || got.IdempotentHint != idempotent || *got.OpenWorldHint != openWorld {
+			t.Fatalf("tool %q annotations = %#v", name, got)
+		}
+		if tool.Title == "" || tool.Description == "" {
+			t.Fatalf("tool %q missing title/description", name)
+		}
+	}
+	assertToolHints("start_process", false, true, false, true)
+	assertToolHints("read_file", true, false, false, true)
+	assertToolHints("list_directory", true, false, true, false)
+	assertToolHints("create_directory", false, false, true, false)
+	assertToolHints("kill_process", false, true, true, false)
+	assertToolHints("get_more_search_results", true, false, true, false)
 	for name, found := range required {
 		if !found {
 			t.Errorf("required tool %q not listed", name)

@@ -97,10 +97,21 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	}
 
 	v := version.Current()
-	server := mcp.NewServer(&mcp.Implementation{Name: "mcpd", Version: v.Version}, &mcp.ServerOptions{
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:        "mcpd",
+		Title:       "MCPD",
+		Description: "Remote Linux development and server operations through precise process, filesystem, and search tools.",
+		Version:     v.Version,
+		WebsiteURL:  "https://github.com/kemalnw/mcpd",
+	}, &mcp.ServerOptions{
 		Logger:       logger,
 		Capabilities: &mcp.ServerCapabilities{},
-		Instructions: "mcpd provides direct Linux VM process and filesystem capabilities using the permissions of the daemon user.",
+		Instructions: `MCPD operates the connected Linux VM with the permissions of the daemon user.
+Choose the narrowest dedicated tool that directly matches the task; use start_process only when shell execution is actually needed.
+For files: use list_directory to browse a known directory, start_search to discover filenames or content, read_file/read_multiple_files to read known paths, get_file_info for metadata, edit_block for localized edits, and write_file for full rewrites/creation/appends.
+For commands: use start_process once, then continue that PID with read_process_output or interact_with_process. Prefer force_terminate for MCPD-managed PIDs and kill_process only for arbitrary OS processes.
+For searches: continue an existing search with get_more_search_results instead of launching a duplicate search. Stop it only when cancellation is useful.
+Read-only inspection should precede mutation when target paths, PIDs, or current state are uncertain. Avoid unnecessary tool calls and batch independent reads when practical.`,
 	})
 	tools.RegisterProcess(server, processes, auditStore)
 	tools.RegisterFilesystem(server, files, auditStore)

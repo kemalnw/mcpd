@@ -19,13 +19,13 @@ type ProcessTools struct {
 
 func RegisterProcess(server *mcp.Server, manager *processmgr.Manager, auditStore *audit.Store) {
 	t := &ProcessTools{manager: manager, audit: auditStore}
-	mcp.AddTool(server, tool("start_process", "Start a terminal process", "Start a shell command and return when it exits, reaches an interactive prompt, or timeout_ms elapses. timeout_ms only limits how long this call waits; it never limits the lifetime of the spawned process. Long-running processes remain available through their PID.", false, true), audited(auditStore, "start_process", t.start))
-	mcp.AddTool(server, tool("read_process_output", "Read process output", "Read retained output from a managed process. offset=0 reads new output since the previous cursor read; positive offsets are absolute line positions; negative offsets read from the tail. Cursor reads may wait up to timeout_ms for new output.", true, false), audited(auditStore, "read_process_output", t.readOutput))
-	mcp.AddTool(server, tool("interact_with_process", "Interact with a process", "Send input to a managed interactive process or REPL. A trailing newline is added automatically. By default the call waits until the process reaches another prompt, exits, or timeout_ms elapses.", false, true), audited(auditStore, "interact_with_process", t.interact))
-	mcp.AddTool(server, tool("force_terminate", "Force terminate a managed process", "Terminate a process session created by start_process. Sends SIGINT to the process group first, then escalates to SIGKILL if it does not exit promptly.", false, true), audited(auditStore, "force_terminate", t.forceTerminate))
-	mcp.AddTool(server, tool("list_sessions", "List managed process sessions", "List active and recently completed process sessions created by start_process, including PID, state, runtime, output counters, and exit code.", true, false), audited(auditStore, "list_sessions", t.listSessions))
-	mcp.AddTool(server, tool("list_processes", "List operating system processes", "List all Linux processes visible to the mcpd daemon user with PID, CPU usage, memory usage, and full command line.", true, false), audited(auditStore, "list_processes", t.listProcesses))
-	mcp.AddTool(server, tool("kill_process", "Terminate an operating system process", "Send SIGTERM to an arbitrary Linux process by PID. This is not limited to processes created by mcpd and uses the permissions of the user running the daemon.", false, true), audited(auditStore, "kill_process", t.killProcess))
+	mcp.AddTool(server, tool("start_process", "Run a shell command", "Use this for shell commands, builds, tests, package managers, Git, service inspection, and other terminal work. Prefer dedicated MCPD file/search tools when the task only needs reading, listing, searching, or editing files. The call returns on process exit, an interactive prompt, or timeout_ms; the process keeps running after a wait timeout and can be continued with read_process_output or interact_with_process.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process", t.start))
+	mcp.AddTool(server, tool("read_process_output", "Read command output", "Use this only for a PID returned by start_process. Read retained stdout/stderr and process state without starting another command. offset=0 reads new output from the session cursor; positive offsets read an absolute retained range; negative offsets read from the tail. Prefer this over starting a second shell command merely to inspect an existing MCPD process.", toolHints{readOnly: true}), audited(auditStore, "read_process_output", t.readOutput))
+	mcp.AddTool(server, tool("interact_with_process", "Send input to a command", "Use this only for an interactive PID returned by start_process when the process is waiting for stdin, a confirmation, password-free prompt, REPL input, or similar interaction. Do not use it for a new command; use start_process instead. A newline is appended when absent.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "interact_with_process", t.interact))
+	mcp.AddTool(server, tool("force_terminate", "Stop a managed command", "Use this to stop a process session created by start_process. It targets the managed process group, sends SIGINT first, and escalates to SIGKILL if needed. Prefer this over kill_process for MCPD-managed sessions because it handles the process group and cleanup correctly.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "force_terminate", t.forceTerminate))
+	mcp.AddTool(server, tool("list_sessions", "List MCPD command sessions", "Use this to discover PIDs and state for commands previously started through start_process, including retained completed sessions. Prefer list_processes only when you need the full operating-system process table rather than MCPD-managed sessions.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_sessions", t.listSessions))
+	mcp.AddTool(server, tool("list_processes", "List Linux processes", "Use this to inspect the operating-system process table visible to the MCPD daemon user, including PID, CPU, memory, and command line. Prefer list_sessions when the target was started through MCPD and you need its managed session state or retained output.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_processes", t.listProcesses))
+	mcp.AddTool(server, tool("kill_process", "Terminate a Linux process", "Use this only to send SIGTERM to an arbitrary operating-system PID that was not necessarily started by MCPD. Prefer force_terminate for PIDs from start_process. This changes VM state and can stop unrelated services if the PID is chosen incorrectly.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "kill_process", t.killProcess))
 }
 
 type StartProcessInput struct {
@@ -111,11 +111,24 @@ func (t *ProcessTools) killProcess(_ context.Context, in PIDInput) (TerminateOut
 	return TerminateOutput{PID: in.PID, Terminated: true, Signal: "SIGTERM"}, nil
 }
 
-func tool(name, title, description string, readOnly, destructive bool) *mcp.Tool {
-	openWorld := true
+type toolHints struct {
+	readOnly    bool
+	destructive bool
+	idempotent  bool
+	openWorld   bool
+}
+
+func tool(name, title, description string, hints toolHints) *mcp.Tool {
 	return &mcp.Tool{
-		Name: name, Title: title, Description: description,
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, DestructiveHint: boolPtr(destructive), OpenWorldHint: &openWorld},
+		Name:        name,
+		Title:       title,
+		Description: description,
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:    hints.readOnly,
+			DestructiveHint: boolPtr(hints.destructive),
+			IdempotentHint:  hints.idempotent,
+			OpenWorldHint:   boolPtr(hints.openWorld),
+		},
 	}
 }
 
