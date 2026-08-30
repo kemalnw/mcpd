@@ -302,6 +302,12 @@ Unlike raw ripgrep `-m`, `maxResults` is a **global match cap** across the whole
 search. `filePattern` is an additional filter and therefore intersects the main
 filename pattern.
 
+Content-match results include `file`, `line`, the complete source line in `text`,
+the matched substring in `match`, and `column` / `end_column`. Columns are 1-based
+Unicode character positions; `end_column` is exclusive. Context-only results use
+`text` for the complete source line and omit match-span fields. Native and ripgrep
+backends share this result contract.
+
 ### `get_more_search_results`
 
 ```json

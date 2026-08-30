@@ -27,7 +27,10 @@ type Options struct {
 type Result struct {
 	File      string `json:"file"`
 	Line      int    `json:"line,omitempty"`
+	Text      string `json:"text,omitempty"`
 	Match     string `json:"match,omitempty"`
+	Column    int    `json:"column,omitempty"`
+	EndColumn int    `json:"end_column,omitempty"`
 	Type      string `json:"type"`
 	IsContext bool   `json:"is_context,omitempty"`
 }
