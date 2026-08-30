@@ -186,12 +186,15 @@ does not require renaming tools or fragmenting the model-facing API.
 
 Current text semantics:
 
+- Local text returns source exactly once in `lines`; `content` is omitted. This
+  keeps the payload aligned with line-based pagination without duplicating source text.
 - `offset >= 0`: zero-based line position, returning at most `length` lines.
 - `offset < 0`: return the last `abs(offset)` lines; `length` is ignored.
 - Reads stream through the file and keep only the requested range/tail in
   memory; the complete file is not loaded merely to paginate it.
 - `isUrl=true` performs a full textual HTTP/HTTPS fetch with response-size and
-  request-time bounds.
+  request-time bounds. URL text is returned exactly once in `content`; `lines`
+  is omitted while `read_count` and `total_lines` remain available as metadata.
 
 Planned handlers behind this same tool: PNG/JPEG/GIF/WebP, Excel, PDF, and
 DOCX outline/raw-XML modes.

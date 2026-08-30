@@ -117,7 +117,7 @@ func (m *Manager) readURL(ctx context.Context, rawURL string) (ReadResult, error
 	}
 	content := string(body)
 	lines := splitLines(content)
-	return ReadResult{Path: rawURL, Source: "url", FileType: FileTypeText, MIMEType: contentType, Content: content, Lines: lines, ReadCount: len(lines), TotalLines: len(lines), Size: int64(len(body))}, nil
+	return ReadResult{Path: rawURL, Source: "url", FileType: FileTypeText, MIMEType: contentType, Content: content, ReadCount: len(lines), TotalLines: len(lines), Size: int64(len(body))}, nil
 }
 
 func detectFileType(path string) (string, string, error) {

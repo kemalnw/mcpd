@@ -148,7 +148,11 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	}
 	assertToolOK(t, readResult)
 	readStructured := requireStructuredMap(t, readResult)
-	if readStructured["content"] != "beta" || readStructured["total_lines"] != float64(2) {
+	if _, duplicated := readStructured["content"]; duplicated {
+		t.Fatalf("local read unexpectedly included duplicate content: %#v", readStructured)
+	}
+	lines, ok := readStructured["lines"].([]any)
+	if !ok || len(lines) != 1 || lines[0] != "beta" || readStructured["total_lines"] != float64(2) {
 		t.Fatalf("unexpected read output: %#v", readStructured)
 	}
 

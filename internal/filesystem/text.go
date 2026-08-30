@@ -69,7 +69,7 @@ func (m *Manager) readTextFile(ctx context.Context, req ReadRequest, size int64,
 	}
 	return ReadResult{
 		Path: req.Path, Source: "file", FileType: FileTypeText, MIMEType: mimeType,
-		Content: strings.Join(selected, "\n"), Lines: selected, Offset: req.Offset,
+		Lines: selected, Offset: req.Offset,
 		ReadFrom: readFrom, ReadCount: len(selected), TotalLines: total, Remaining: remaining, Size: size,
 	}, nil
 }
