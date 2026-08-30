@@ -48,6 +48,7 @@ func toolInputAttrs(in any) []slog.Attr {
 	case StartProcessInput:
 		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS)}
 		attrs = appendLogString(attrs, "command", v.Command, maxCommandLogBytes)
+		attrs = appendLogString(attrs, "cwd", v.CWD, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "pty_mode", v.PTY, maxMetadataLogBytes)
 		return attrs
@@ -122,6 +123,7 @@ func toolOutputAttrs(out any) []slog.Attr {
 			slog.Int("remaining", v.Remaining),
 			slog.Int64("waited_ms", v.WaitedMS),
 		}
+		attrs = appendLogString(attrs, "cwd", v.CWD, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
 		return appendExitCode(attrs, v.ExitCode)
 	case processmgr.OutputResult:

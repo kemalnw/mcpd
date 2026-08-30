@@ -26,9 +26,9 @@ func TestAuditedLogsStartProcessAndCorrelatesAuditEvent(t *testing.T) {
 
 	exitCode := 0
 	handler := audited(store, "start_process", func(context.Context, StartProcessInput) (processmgr.StartResult, error) {
-		return processmgr.StartResult{PID: 4242, Shell: "/bin/bash", PTY: false, State: processmgr.StateExited, ExitCode: &exitCode, WaitedMS: 7}, nil
+		return processmgr.StartResult{PID: 4242, CWD: "/srv/app", Shell: "/bin/bash", PTY: false, State: processmgr.StateExited, ExitCode: &exitCode, WaitedMS: 7}, nil
 	})
-	_, _, err = handler(context.Background(), nil, StartProcessInput{Command: "df -h", TimeoutMS: 5000, PTY: "never"})
+	_, _, err = handler(context.Background(), nil, StartProcessInput{Command: "df -h", CWD: "/srv/app", TimeoutMS: 5000, PTY: "never"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,10 +38,10 @@ func TestAuditedLogsStartProcessAndCorrelatesAuditEvent(t *testing.T) {
 		t.Fatalf("log entry count = %d, want 2: %s", len(entries), logs.String())
 	}
 	call, result := entries[0], entries[1]
-	if call["msg"] != "mcp tool call" || call["tool"] != "start_process" || call["command"] != "df -h" {
+	if call["msg"] != "mcp tool call" || call["tool"] != "start_process" || call["command"] != "df -h" || call["cwd"] != "/srv/app" {
 		t.Fatalf("unexpected call log: %#v", call)
 	}
-	if result["msg"] != "mcp tool result" || result["status"] != "success" || result["pid"] != float64(4242) || result["process_state"] != "exited" || result["exit_code"] != float64(0) {
+	if result["msg"] != "mcp tool result" || result["status"] != "success" || result["pid"] != float64(4242) || result["cwd"] != "/srv/app" || result["process_state"] != "exited" || result["exit_code"] != float64(0) {
 		t.Fatalf("unexpected result log: %#v", result)
 	}
 	if call["event_id"] == "" || call["event_id"] != result["event_id"] {

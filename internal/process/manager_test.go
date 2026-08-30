@@ -5,6 +5,8 @@ package process
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +65,44 @@ func TestWaitTimeoutDoesNotTerminateProcess(t *testing.T) {
 	}
 	if err := m.ForceTerminate(result.PID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStartUsesWorkingDirectory(t *testing.T) {
+	m := testManager(t)
+	cwd := t.TempDir()
+	script := filepath.Join(cwd, "hello.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'cwd-ok\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := m.Start(context.Background(), StartRequest{
+		Command: "./hello.sh", CWD: cwd, TimeoutMS: 1000, PTY: PTYNever,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CWD != cwd || strings.Join(result.Output, ",") != "cwd-ok" {
+		t.Fatalf("command did not execute from cwd: %+v", result)
+	}
+	sessions := m.ListSessions()
+	if len(sessions) == 0 || sessions[0].CWD != cwd {
+		t.Fatalf("session did not retain cwd metadata: %+v", sessions)
+	}
+}
+
+func TestStartRejectsInvalidWorkingDirectory(t *testing.T) {
+	m := testManager(t)
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := m.Start(context.Background(), StartRequest{Command: "true", CWD: missing, TimeoutMS: 1000, PTY: PTYNever}); err == nil || !strings.Contains(err.Error(), "cwd") || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing cwd error = %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Start(context.Background(), StartRequest{Command: "true", CWD: file, TimeoutMS: 1000, PTY: PTYNever}); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("file cwd error = %v", err)
 	}
 }
 

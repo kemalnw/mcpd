@@ -82,6 +82,7 @@ client can understand the server and initiate linking before a tool executes.
 ```json
 {
   "command": "string, required",
+  "cwd": "string, optional working directory",
   "timeout_ms": "integer, required",
   "shell": "string, optional",
   "verbose_timing": "boolean, optional",
@@ -91,6 +92,7 @@ client can understand the server and initiate linking before a tool executes.
 
 Semantics:
 
+- `cwd`, when provided, is validated as an existing directory before process creation and is assigned through `exec.Cmd.Dir`; repository-scoped callers should prefer it over embedding `cd <path> &&` in the shell command.
 - Process is created before waiting.
 - `timeout_ms` limits the tool-call wait only.
 - Wait ends on process exit, detected interactive prompt, or timeout.
