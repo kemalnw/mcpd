@@ -81,7 +81,9 @@ git push origin vX.Y.Z
 The workflow validates the tag, reruns source checks, builds both architectures,
 signs every release asset keylessly through GitHub OIDC/Sigstore, creates build
 provenance, verifies the generated signatures, and only then creates the GitHub
-Release. Tags containing a prerelease suffix such as `v1.0.0-rc.1` produce a
+Release.
+
+After deploying an MCPD upgrade, verify the public endpoint with `scripts/verify-live-schema.sh`. `/healthz` publishes both the binary version and a tool-catalog version/fingerprint. The verifier can compare them using `MCPD_EXPECT_VERSION`, `MCPD_EXPECT_CATALOG_VERSION`, and `MCPD_EXPECT_CATALOG_FINGERPRINT`. If the live server reports the expected catalog but a connected client still lacks a tool or input field, the remaining problem is client-side schema caching; reconnect/reload that MCP client rather than repeatedly restarting the daemon. Tags containing a prerelease suffix such as `v1.0.0-rc.1` produce a
 GitHub prerelease.
 
 Do not manually replace assets on an existing version. Publish a new version so

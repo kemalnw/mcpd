@@ -33,7 +33,15 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null
 
-"$ROOT/scripts/verify-live-schema.sh" "http://127.0.0.1:$PORT" start_search pathHint >/dev/null
+"$ROOT/scripts/verify-live-schema.sh" "http://127.0.0.1:$PORT" start_search pathHint >"$TMP/schema.out"
+catalog_version=$(sed -n 's/^tool_catalog_version=//p' "$TMP/schema.out")
+catalog_fingerprint=$(sed -n 's/^tool_catalog_fingerprint=//p' "$TMP/schema.out")
+MCPD_EXPECT_CATALOG_VERSION="$catalog_version" MCPD_EXPECT_CATALOG_FINGERPRINT="$catalog_fingerprint" \
+  "$ROOT/scripts/verify-live-schema.sh" "http://127.0.0.1:$PORT" start_search pathHint >/dev/null
+if MCPD_EXPECT_CATALOG_VERSION=999999 "$ROOT/scripts/verify-live-schema.sh" "http://127.0.0.1:$PORT" start_search pathHint >/dev/null 2>&1; then
+  echo "schema verifier accepted the wrong catalog version" >&2
+  exit 1
+fi
 if "$ROOT/scripts/verify-live-schema.sh" "http://127.0.0.1:$PORT" start_search definitely_missing_field >/dev/null 2>&1; then
   echo "schema verifier accepted a missing field" >&2
   exit 1
