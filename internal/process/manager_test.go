@@ -31,6 +31,9 @@ func TestStartCapturesCompletedProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := strings.Join(result.Output, "|"); got != "alpha|beta" || result.ReadFrom != 0 || result.ReadCount != 2 || result.TotalLines != 2 || result.Remaining != 0 {
+		t.Fatalf("unexpected initial output page: %+v", result)
+	}
 	waitForSessionExit(t, m, result.PID, 5*time.Second)
 	final, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 100})
 	if err != nil {
@@ -55,8 +58,35 @@ func TestWaitTimeoutDoesNotTerminateProcess(t *testing.T) {
 	if result.State == StateExited {
 		t.Fatalf("process unexpectedly exited: %+v", result)
 	}
+	if result.ReadCount != 1 || result.TotalLines != 1 || result.Remaining != 0 || strings.Join(result.Output, "") != "ready" {
+		t.Fatalf("unexpected running-process initial page: %+v", result)
+	}
 	if err := m.ForceTerminate(result.PID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStartCapsInitialOutputPage(t *testing.T) {
+	m, err := NewManager(Options{
+		DefaultShell: "/bin/bash", DefaultWaitMS: 250, InitialOutputLines: 3,
+		OutputBufferBytes: 1 << 20, MaxLineBytes: 1 << 16, CompletedSessions: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	result, err := m.Start(context.Background(), StartRequest{
+		Command: "printf '0\\n1\\n2\\n3\\n4\\n'", TimeoutMS: 1000, PTY: PTYNever,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(result.Output, ","); got != "0,1,2" {
+		t.Fatalf("initial output = %q, want first three lines: %+v", got, result)
+	}
+	if result.ReadFrom != 0 || result.ReadCount != 3 || result.TotalLines != 5 || result.Remaining != 2 || result.EvictedLines != 0 {
+		t.Fatalf("unexpected initial pagination metadata: %+v", result)
 	}
 }
 

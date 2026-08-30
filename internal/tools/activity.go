@@ -117,6 +117,9 @@ func toolOutputAttrs(out any) []slog.Attr {
 			slog.String("process_state", string(v.State)),
 			slog.Bool("pty", v.PTY),
 			slog.Bool("waiting_for_input", v.WaitingForInput),
+			slog.Int("read_count", v.ReadCount),
+			slog.Int("total_lines", v.TotalLines),
+			slog.Int("remaining", v.Remaining),
 			slog.Int64("waited_ms", v.WaitedMS),
 		}
 		attrs = appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
