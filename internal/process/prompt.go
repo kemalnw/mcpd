@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-const promptStabilityDelay = 50 * time.Millisecond
+const (
+	promptStabilityDelayKnown   = 50 * time.Millisecond
+	promptStabilityDelayUnknown = 250 * time.Millisecond
+)
 
 var promptPattern = regexp.MustCompile(`(?:>>> |\.\.\. |> |\$ |# |% |mysql> |sqlite> |psql[^\r\n]*[=#] )$`)
 
@@ -49,9 +52,20 @@ func commandLikelyInteractive(command string) bool {
 	case "python", "python3", "node", "irb":
 		return len(fields) == 1 || contains(fields[1:], "-i")
 	case "bash", "zsh", "sh", "fish":
-		return len(fields) == 1
+		return len(fields) == 1 || contains(fields[1:], "-i")
 	}
 	return false
+}
+
+func promptStabilityDelayFor(command string) time.Duration {
+	if commandLikelyInteractive(command) {
+		return promptStabilityDelayKnown
+	}
+	// Arbitrary PTY commands are fundamentally ambiguous: ordinary status text
+	// may temporarily end in "$ ", "# ", "> ", etc. Give unknown commands a
+	// longer quiet period so scheduler delay alone does not turn transient output
+	// into an input prompt. Known shells/REPLs retain the fast path above.
+	return promptStabilityDelayUnknown
 }
 
 func contains(values []string, target string) bool {

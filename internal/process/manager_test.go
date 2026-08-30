@@ -466,3 +466,48 @@ func TestForceTerminateRunningSessionUsesManagedSignalPath(t *testing.T) {
 		t.Fatal("running managed process was not signaled")
 	}
 }
+
+func TestUnknownPTYTransientPromptLikeOutputGetsExtendedStabilityWindow(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{
+		Command: "printf 'build step $ '; sleep 0.12; printf '\\nstill running\\n'; sleep 10", TimeoutMS: 600, PTY: PTYAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WaitingForInput || result.State == StateWaiting {
+		t.Fatalf("transient unknown-command prompt was accepted too early: %+v", result)
+	}
+	if err := m.ForceTerminate(result.PID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnknownPTYStablePromptStillDetectedAfterExtendedWindow(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{
+		Command: "printf '$ '; read value; printf 'got:%s\\n' \"$value\"", TimeoutMS: 1000, PTY: PTYAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.WaitingForInput || result.State != StateWaiting {
+		t.Fatalf("stable unknown-command prompt was not detected: %+v", result)
+	}
+	interaction, err := m.Interact(context.Background(), InteractRequest{PID: result.PID, Input: "ok", TimeoutMS: 1000, WaitForPrompt: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(interaction.Lines, "\n"), "got:ok") && interaction.State != StateExited {
+		// The exit/output may arrive just after the interaction call; inspect the
+		// retained tail without relying on a scheduling race.
+		waitForSessionExit(t, m, result.PID, time.Second)
+		out, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: -10, Length: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(strings.Join(out.Lines, "\n"), "got:ok") {
+			t.Fatalf("interactive continuation missing: %+v", out)
+		}
+	}
+}

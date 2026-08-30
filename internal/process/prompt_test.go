@@ -26,3 +26,15 @@ func TestLooksLikePromptOnlyUsesCurrentTerminalLine(t *testing.T) {
 		})
 	}
 }
+
+func TestPromptStabilityDelayIsAdaptive(t *testing.T) {
+	if got := promptStabilityDelayFor("python3 -q -i"); got != promptStabilityDelayKnown {
+		t.Fatalf("known REPL delay=%s want %s", got, promptStabilityDelayKnown)
+	}
+	if got := promptStabilityDelayFor("bash -i"); got != promptStabilityDelayKnown {
+		t.Fatalf("interactive shell delay=%s want %s", got, promptStabilityDelayKnown)
+	}
+	if got := promptStabilityDelayFor("printf 'build step $ '"); got != promptStabilityDelayUnknown {
+		t.Fatalf("unknown command delay=%s want %s", got, promptStabilityDelayUnknown)
+	}
+}
