@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -309,6 +310,99 @@ func TestPreferredRootExactFilenameAvoidsNoisyHome(t *testing.T) {
 	}
 }
 
+func TestWorkspaceIndexCachesPathHintResolution(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	writeTestFile(t, filepath.Join(src, "mcpd", "go.mod"), "module mcpd\n")
+	m, err := NewManager(ManagerOptions{
+		DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond,
+		PreferredRoots: []string{src}, WorkspaceIndexTTL: time.Minute, WorkspaceIndexMaxEntries: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	initialScans := m.workspaceIndexScans
+	for i := 0; i < 3; i++ {
+		start, err := m.Start(context.Background(), Options{RootPath: root, Pattern: "go.mod", PathHint: "mcpd", SearchType: TypeFiles, IgnoreCase: true, MaxResults: 10, EarlyTermination: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		read := waitSearchComplete(t, m, start.SessionID)
+		if read.TotalMatches != 1 || read.Results[0].File != filepath.Join(src, "mcpd", "go.mod") {
+			t.Fatalf("cached pathHint resolution failed: %#v", read.Results)
+		}
+	}
+	if m.workspaceIndexScans != initialScans {
+		t.Fatalf("repeated pathHint caused index rescan: before=%d after=%d", initialScans, m.workspaceIndexScans)
+	}
+}
+
+func TestWorkspaceIndexExactNameWinsAndRefreshesStaleEntries(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	exact := filepath.Join(src, "app")
+	substring := filepath.Join(src, "app-server")
+	writeTestFile(t, filepath.Join(exact, "go.mod"), "module app\n")
+	writeTestFile(t, filepath.Join(substring, "go.mod"), "module app-server\n")
+	m, err := NewManager(ManagerOptions{
+		DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond,
+		PreferredRoots: []string{src}, WorkspaceIndexTTL: 20 * time.Millisecond, WorkspaceIndexMaxEntries: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	start, err := m.Start(context.Background(), Options{RootPath: root, Pattern: "go.mod", PathHint: "app", SearchType: TypeFiles, IgnoreCase: true, MaxResults: 10, EarlyTermination: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := waitSearchComplete(t, m, start.SessionID)
+	if len(read.Results) != 1 || read.Results[0].File != filepath.Join(exact, "go.mod") {
+		t.Fatalf("exact repo name did not beat substring collision: %#v", read.Results)
+	}
+
+	if err := os.RemoveAll(exact); err != nil {
+		t.Fatal(err)
+	}
+	newRepo := filepath.Join(src, "fresh")
+	writeTestFile(t, filepath.Join(newRepo, "go.mod"), "module fresh\n")
+	time.Sleep(30 * time.Millisecond)
+	fresh, err := m.Start(context.Background(), Options{RootPath: root, Pattern: "go.mod", PathHint: "fresh", SearchType: TypeFiles, IgnoreCase: true, MaxResults: 10, EarlyTermination: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshRead := waitSearchComplete(t, m, fresh.SessionID)
+	if len(freshRead.Results) != 1 || freshRead.Results[0].File != filepath.Join(newRepo, "go.mod") {
+		t.Fatalf("new repo not visible after index TTL refresh: %#v", freshRead.Results)
+	}
+	m.ensureWorkspaceIndex(time.Now())
+	for _, entry := range m.workspaceEntries {
+		if entry.Path == exact {
+			t.Fatalf("deleted repo remained in refreshed index: %#v", m.workspaceEntries)
+		}
+	}
+}
+
+func TestWorkspaceIndexIsBoundedAndSkipsDependencyTrees(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	for i := 0; i < 8; i++ {
+		writeTestFile(t, filepath.Join(src, fmt.Sprintf("repo-%02d", i), "go.mod"), "module x\n")
+	}
+	writeTestFile(t, filepath.Join(src, "node_modules", "fake-repo", "go.mod"), "module fake\n")
+	entries := buildWorkspaceIndex([]string{src}, 3)
+	if len(entries) != 3 {
+		t.Fatalf("workspace index cap not enforced: %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(filepath.ToSlash(entry.Path), "/node_modules/") {
+			t.Fatalf("dependency tree was indexed: %#v", entries)
+		}
+	}
+}
+
 func TestRipgrepFilePatternIsIntersectionNotUnion(t *testing.T) {
 	rg, err := exec.LookPath("rg")
 	if err != nil {
@@ -330,5 +424,105 @@ func TestRipgrepFilePatternIsIntersectionNotUnion(t *testing.T) {
 	read := waitSearchComplete(t, m, start.SessionID)
 	if read.TotalMatches != 1 || filepath.Base(read.Results[0].File) != "alpha.go" {
 		t.Fatalf("filePattern must intersect main pattern, got %#v", read.Results)
+	}
+}
+
+func TestWorkspaceIndexAvoidsRepeatedHintWalks(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	writeTestFile(t, filepath.Join(src, "mcpd", "go.mod"), "module mcpd\n")
+	m, err := NewManager(ManagerOptions{DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond, PreferredRoots: []string{src}, WorkspaceIndexTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	initialScans := m.workspaceIndexScans
+	for i := 0; i < 2; i++ {
+		start, err := m.Start(context.Background(), Options{RootPath: root, Pattern: "go.mod", PathHint: "mcpd", SearchType: TypeFiles, IgnoreCase: true, MaxResults: 10, EarlyTermination: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		read := waitSearchComplete(t, m, start.SessionID)
+		if len(read.Results) != 1 || read.Results[0].File != filepath.Join(src, "mcpd", "go.mod") {
+			t.Fatalf("unexpected indexed lookup: %#v", read.Results)
+		}
+	}
+	if m.workspaceIndexScans != initialScans {
+		t.Fatalf("repeated lookup refreshed index: scans=%d initial=%d", m.workspaceIndexScans, initialScans)
+	}
+}
+
+func TestWorkspaceIndexExactNameCollisionIsDeterministic(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	direct := filepath.Join(src, "mcpd")
+	nested := filepath.Join(src, "team", "mcpd")
+	writeTestFile(t, filepath.Join(direct, "go.mod"), "module direct\n")
+	writeTestFile(t, filepath.Join(nested, "go.mod"), "module nested\n")
+	m, err := NewManager(ManagerOptions{DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond, PreferredRoots: []string{src}, WorkspaceIndexTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if got := m.resolveWorkspaceHint(root, "mcpd"); got != direct {
+		t.Fatalf("collision resolved to %q, want %q", got, direct)
+	}
+}
+
+func TestWorkspaceIndexRefreshFindsNewRepository(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(ManagerOptions{DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond, PreferredRoots: []string{src}, WorkspaceIndexTTL: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	writeTestFile(t, filepath.Join(src, "newrepo", "go.mod"), "module newrepo\n")
+	time.Sleep(10 * time.Millisecond)
+	if got := m.resolveWorkspaceHint(root, "newrepo"); got != filepath.Join(src, "newrepo") {
+		t.Fatalf("refreshed index resolved %q", got)
+	}
+	if m.workspaceIndexScans < 2 {
+		t.Fatalf("expected refresh scan, got %d", m.workspaceIndexScans)
+	}
+}
+
+func TestWorkspaceIndexDoesNotReturnDeletedRepository(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	repo := filepath.Join(src, "gone")
+	writeTestFile(t, filepath.Join(repo, "go.mod"), "module gone\n")
+	m, err := NewManager(ManagerOptions{DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond, PreferredRoots: []string{src}, WorkspaceIndexTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.resolveWorkspaceHint(root, "gone"); got != "" {
+		t.Fatalf("deleted repository resolved to stale path %q", got)
+	}
+	if m.workspaceIndexScans < 2 {
+		t.Fatalf("stale entry did not trigger refresh: scans=%d", m.workspaceIndexScans)
+	}
+}
+
+func TestWorkspaceIndexIsBounded(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	for _, name := range []string{"one", "two", "three"} {
+		writeTestFile(t, filepath.Join(src, name, "go.mod"), "module "+name+"\n")
+	}
+	m, err := NewManager(ManagerOptions{DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond, PreferredRoots: []string{src}, WorkspaceIndexTTL: time.Hour, WorkspaceIndexMaxEntries: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if len(m.workspaceEntries) != 2 {
+		t.Fatalf("workspace index size = %d, want 2", len(m.workspaceEntries))
 	}
 }

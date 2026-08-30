@@ -285,13 +285,7 @@ completion, or the configured initial wait (40 ms by default). Exact filename
 searches inherit Desktop Commander-style 1500 ms default timeout when no timeout
 is supplied.
 
-When `path` is broad and the daemon has discovered conventional workspace roots
-(such as `~/src`, `~/workspace`, or `~/projects`), `pathHint` can name the intended
-project/repository. MCPD resolves that hint to a matching workspace directory before
-running the search, avoiding repeated searches from progressively broader roots.
-For exact filename searches with early termination and no hint, MCPD also checks
-workspace roots before noisy home-level dependency/cache trees. If no preferred
-match is found, normal broad-search semantics are preserved.
+When `path` is broad and the daemon has discovered conventional workspace roots (such as `~/src`, `~/workspace`, or `~/projects`), `pathHint` can name the intended project/repository. MCPD maintains a bounded workspace index of Git/module roots under those directories (default refresh 30 seconds, depth 4, max 2048 entries), prefers exact repository-name matches deterministically, and reuses the index across repeated lookups instead of walking the tree each time. Deleted stale entries trigger refresh; newly created repositories become visible on the next refresh. If the index has no match, the existing bounded filesystem fallback preserves broad-search behavior. For exact filename searches with early termination and no hint, MCPD also checks workspace roots before noisy home-level dependency/cache trees.
 
 Ripgrep is selected automatically when available. Otherwise a native Go walker
 provides the same MCP contract. The fallback does not currently interpret

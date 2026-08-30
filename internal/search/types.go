@@ -80,10 +80,12 @@ type SessionInfo struct {
 }
 
 type ManagerOptions struct {
-	DefaultMaxResults int
-	Retention         time.Duration
-	InitialWait       time.Duration
-	RipgrepPath       string
-	DisableRipgrep    bool
-	PreferredRoots    []string
+	DefaultMaxResults        int
+	Retention                time.Duration
+	InitialWait              time.Duration
+	RipgrepPath              string
+	DisableRipgrep           bool
+	PreferredRoots           []string
+	WorkspaceIndexTTL        time.Duration
+	WorkspaceIndexMaxEntries int
 }
