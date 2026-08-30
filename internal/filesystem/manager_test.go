@@ -554,3 +554,45 @@ func TestListDirectoryGlobalCap(t *testing.T) {
 		t.Fatalf("global cap not enforced: %+v", result)
 	}
 }
+
+func TestAppendExpectedSizeRecognizesLostResponseReplay(t *testing.T) {
+	m := testManager(t)
+	path := filepath.Join(t.TempDir(), "append.txt")
+	if err := os.WriteFile(path, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected := int64(len("base\n"))
+	first, err := m.Write(context.Background(), WriteRequest{Path: path, Mode: "append", Content: "once\n", ExpectedSize: &expected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Replayed || first.SizeBefore != expected || first.SizeAfter != expected+int64(len("once\n")) {
+		t.Fatalf("first append=%+v", first)
+	}
+	replay, err := m.Write(context.Background(), WriteRequest{Path: path, Mode: "append", Content: "once\n", ExpectedSize: &expected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replay.Replayed || replay.BytesWritten != 0 {
+		t.Fatalf("append replay=%+v", replay)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "base\nonce\n" {
+		t.Fatalf("append duplicated content: %q", data)
+	}
+}
+
+func TestAppendExpectedSizeFailsClosedOnAmbiguousRetry(t *testing.T) {
+	m := testManager(t)
+	path := filepath.Join(t.TempDir(), "append.txt")
+	if err := os.WriteFile(path, []byte("base\nother\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected := int64(len("base\n"))
+	if _, err := m.Write(context.Background(), WriteRequest{Path: path, Mode: "append", Content: "once\n", ExpectedSize: &expected}); err == nil || !strings.Contains(err.Error(), "append precondition failed") {
+		t.Fatalf("ambiguous append retry error=%v", err)
+	}
+}

@@ -18,10 +18,10 @@ func RegisterFilesystem(server *mcp.Server, manager *fsmgr.Manager, auditStore *
 	t := &FilesystemTools{manager: manager}
 	mcp.AddTool(server, tool("read_file", "Read a file or URL", "Use this to read one text file with line pagination, or to fetch a textual HTTP/HTTPS URL when isUrl=true. Prefer read_multiple_files when several known local files are needed, start_search when the file/location is unknown, and get_file_info when only metadata is needed. Local text returns a single line-oriented `lines` payload with pagination metadata; URL text returns a single full `content` payload. For local files, offset is zero-based; negative offsets read from the tail.", toolHints{readOnly: true, openWorld: true}), audited(auditStore, "read_file", t.readFile))
 	mcp.AddTool(server, tool("read_multiple_files", "Read multiple local files", "Use this when the exact paths of multiple local text files are already known and they can be read independently in one call. Prefer read_file for one file or paginated continuation, and start_search when you need to discover which files contain something.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "read_multiple_files", t.readMultipleFiles))
-	mcp.AddTool(server, tool("write_file", "Write or append a text file", "Use this to create a text file, replace its complete contents, or append text. mode defaults to rewrite; use append only when preserving existing content is intended. Prefer edit_block for a targeted change inside an existing file so unrelated content is not rewritten.", toolHints{destructive: true}), audited(auditStore, "write_file", t.writeFile))
+	mcp.AddTool(server, tool("write_file", "Write or append a text file", "Use this to create a text file, replace its complete contents, or append text. mode defaults to rewrite. For retry-safe append after a lost response, pass expected_size from the file size observed before the first append; MCPD verifies the precondition or recognizes an already-applied identical append. Append without expected_size is not safe to blindly retry. Prefer edit_block for targeted changes.", toolHints{destructive: true}), audited(auditStore, "write_file", t.writeFile))
 	mcp.AddTool(server, tool("create_directory", "Create a directory", "Use this to create a directory and any missing parent directories. It is additive and safe to repeat for the same path. Do not use start_process with mkdir when this dedicated tool is sufficient.", toolHints{idempotent: true}), audited(auditStore, "create_directory", t.createDirectory))
 	mcp.AddTool(server, tool("list_directory", "List directory contents", "Use this to inspect a known directory, optionally recursively. Recursive developer-noise directories are pruned by default and a global max_entries cap prevents response explosions; inspect pruned metadata or set includePruned=true only when dependency/cache internals are actually needed. Prefer start_search when looking for a filename or content across a larger tree.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_directory", t.listDirectory))
-	mcp.AddTool(server, tool("move_file", "Move or rename a path", "Use this to rename or move an existing file or directory with the operating-system rename operation. This changes filesystem state. Do not use it for copying; MCPD does not currently expose a dedicated copy tool.", toolHints{destructive: true}), audited(auditStore, "move_file", t.moveFile))
+	mcp.AddTool(server, tool("move_file", "Move or rename a path", "Use this to rename or move an existing file or directory with the operating-system rename operation. A lost response is ambiguous: verify source/destination state with get_file_info before retrying. Do not blindly repeat a move, and do not use it for copying.", toolHints{destructive: true}), audited(auditStore, "move_file", t.moveFile))
 	mcp.AddTool(server, tool("get_file_info", "Inspect file metadata", "Use this when you need metadata for one known file or directory—such as size, permissions, timestamps, detected type, and text line metadata—without reading its contents. Prefer read_file when content is needed and list_directory when inspecting children of a directory.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "get_file_info", t.getFileInfo))
 	mcp.AddTool(server, tool("edit_block", "Edit part of a file", "Use this for precise edits to an existing file. For one change, provide old_string and new_string. For a multi-hunk refactor, provide edits; MCPD validates every exact hunk and overlap before one write, so any validation failure leaves the file unchanged. Prefer this over write_file for localized source/config edits. If no exact match exists, inspect the returned closest-match hint before retrying.", toolHints{destructive: true}), audited(auditStore, "edit_block", t.editBlock))
 }
@@ -45,9 +45,10 @@ type ReadMultipleFilesOutput struct {
 }
 
 type WriteFileInput struct {
-	Path    string `json:"path" jsonschema:"destination file path"`
-	Content string `json:"content" jsonschema:"text content to write"`
-	Mode    string `json:"mode,omitempty" jsonschema:"rewrite or append; defaults to rewrite"`
+	Path         string `json:"path" jsonschema:"destination file path"`
+	Content      string `json:"content" jsonschema:"text content to write"`
+	Mode         string `json:"mode,omitempty" jsonschema:"rewrite or append; defaults to rewrite"`
+	ExpectedSize *int64 `json:"expected_size,omitempty" jsonschema:"append-only retry precondition: file size observed before the first attempt; on replay MCPD verifies the already-appended bytes instead of appending twice"`
 }
 
 type CreateDirectoryInput struct {
@@ -101,7 +102,7 @@ func (t *FilesystemTools) readMultipleFiles(ctx context.Context, in ReadMultiple
 }
 
 func (t *FilesystemTools) writeFile(ctx context.Context, in WriteFileInput) (fsmgr.WriteResult, error) {
-	return t.manager.Write(ctx, fsmgr.WriteRequest{Path: in.Path, Content: in.Content, Mode: in.Mode})
+	return t.manager.Write(ctx, fsmgr.WriteRequest{Path: in.Path, Content: in.Content, Mode: in.Mode, ExpectedSize: in.ExpectedSize})
 }
 
 func (t *FilesystemTools) createDirectory(_ context.Context, in CreateDirectoryInput) (CreateDirectoryOutput, error) {

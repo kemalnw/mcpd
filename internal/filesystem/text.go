@@ -82,6 +82,47 @@ func (m *Manager) Write(_ context.Context, req WriteRequest) (WriteResult, error
 	if mode == "" {
 		mode = "rewrite"
 	}
+	if req.ExpectedSize != nil && *req.ExpectedSize < 0 {
+		return WriteResult{}, errors.New("expected_size must be >= 0")
+	}
+	if mode != "append" && req.ExpectedSize != nil {
+		return WriteResult{}, errors.New("expected_size is only valid for append mode")
+	}
+
+	var sizeBefore int64
+	info, statErr := os.Stat(req.Path)
+	if statErr == nil {
+		if info.IsDir() {
+			return WriteResult{}, fmt.Errorf("path %q is a directory", req.Path)
+		}
+		sizeBefore = info.Size()
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return WriteResult{}, fmt.Errorf("stat %q: %w", req.Path, statErr)
+	}
+
+	if mode == "append" && req.ExpectedSize != nil {
+		expected := *req.ExpectedSize
+		if sizeBefore != expected {
+			// A transport retry after a successful append observes exactly the
+			// expected post-size. Verify the appended bytes before declaring a
+			// replay; otherwise fail closed instead of duplicating content.
+			postSize := expected + int64(len(req.Content))
+			if sizeBefore == postSize && len(req.Content) > 0 {
+				f, err := os.Open(req.Path)
+				if err != nil {
+					return WriteResult{}, fmt.Errorf("verify append replay %q: %w", req.Path, err)
+				}
+				buf := make([]byte, len(req.Content))
+				_, readErr := f.ReadAt(buf, expected)
+				closeErr := f.Close()
+				if readErr == nil && closeErr == nil && string(buf) == req.Content {
+					return WriteResult{Path: req.Path, Mode: mode, BytesWritten: 0, LineCount: countLines(req.Content), SizeBefore: sizeBefore, SizeAfter: sizeBefore, Replayed: true}, nil
+				}
+			}
+			return WriteResult{}, fmt.Errorf("append precondition failed for %q: size=%d expected=%d", req.Path, sizeBefore, expected)
+		}
+	}
+
 	var flags int
 	switch mode {
 	case "rewrite":
@@ -103,7 +144,11 @@ func (m *Manager) Write(_ context.Context, req WriteRequest) (WriteResult, error
 	if closeErr != nil {
 		return WriteResult{}, fmt.Errorf("close %q: %w", req.Path, closeErr)
 	}
-	return WriteResult{Path: req.Path, Mode: mode, BytesWritten: n, LineCount: countLines(req.Content)}, nil
+	sizeAfter := int64(n)
+	if mode == "append" {
+		sizeAfter = sizeBefore + int64(n)
+	}
+	return WriteResult{Path: req.Path, Mode: mode, BytesWritten: n, LineCount: countLines(req.Content), SizeBefore: sizeBefore, SizeAfter: sizeAfter}, nil
 }
 
 func splitLines(content string) []string {

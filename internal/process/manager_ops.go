@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 
@@ -137,7 +138,48 @@ func (m *Manager) Interact(ctx context.Context, req InteractRequest) (InteractRe
 	if req.TimeoutMS == 0 {
 		req.TimeoutMS = defaultInteractTimeoutMS
 	}
+	key := strings.TrimSpace(req.OperationKey)
+	if err := validateInteractionOperationKey(key); err != nil {
+		return InteractResult{}, err
+	}
 
+	// Terminal input is inherently ordered. Serialize interactions for a session
+	// so an operation-key replay cannot race a different write into the same PTY.
+	s.interactionMu.Lock()
+	defer s.interactionMu.Unlock()
+	var keyHash, fingerprint string
+	if key != "" {
+		fingerprint, err = interactionFingerprint(req)
+		if err != nil {
+			return InteractResult{}, err
+		}
+		keyHash = interactionKeyHash(key)
+		if record, ok := s.interactionRecords[keyHash]; ok {
+			if record.Fingerprint != fingerprint {
+				return InteractResult{}, ErrInteractionOperationConflict
+			}
+			result := cloneInteractResult(record.Result)
+			result.IdempotentReplay = true
+			return result, nil
+		}
+	}
+	result, err := m.interactOnce(ctx, s, req)
+	if err != nil {
+		return InteractResult{}, err
+	}
+	if keyHash != "" {
+		s.interactionRecords[keyHash] = interactionReplayRecord{Fingerprint: fingerprint, Result: cloneInteractResult(result)}
+		s.interactionOrder = append(s.interactionOrder, keyHash)
+		for len(s.interactionOrder) > maxInteractionReplayRecords {
+			oldest := s.interactionOrder[0]
+			s.interactionOrder = s.interactionOrder[1:]
+			delete(s.interactionRecords, oldest)
+		}
+	}
+	return result, nil
+}
+
+func (m *Manager) interactOnce(ctx context.Context, s *session, req InteractRequest) (InteractResult, error) {
 	s.mu.Lock()
 	snapshotChars := s.totalCharsLocked()
 	s.mu.Unlock()

@@ -94,7 +94,7 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	assertToolHints("read_file", true, false, false, true)
 	assertToolHints("list_directory", true, false, true, false)
 	assertToolHints("create_directory", false, false, true, false)
-	assertToolHints("kill_process", false, true, true, false)
+	assertToolHints("kill_process", false, true, false, false)
 	assertToolHints("get_more_search_results", true, false, true, false)
 	for name, found := range required {
 		if !found {

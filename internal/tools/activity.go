@@ -58,7 +58,7 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = appendLogString(attrs, "cwd", v.CWD, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "pty_mode", v.PTY, maxMetadataLogBytes)
-		attrs = append(attrs, slog.Bool("separate_streams", v.SeparateStreams))
+		attrs = append(attrs, slog.Bool("separate_streams", v.SeparateStreams), slog.Bool("has_idempotency_key", strings.TrimSpace(v.IdempotencyKey) != ""))
 		return attrs
 	case StartProcessBatchInput:
 		attrs := []slog.Attr{slog.Int("job_count", len(v.Jobs)), slog.Int("max_parallel", v.MaxParallel), slog.Int("initial_wait_ms", v.InitialWaitMS), slog.Bool("has_idempotency_key", strings.TrimSpace(v.IdempotencyKey) != "")}
@@ -75,11 +75,15 @@ func toolInputAttrs(in any) []slog.Attr {
 	case ReadProcessOutputInput:
 		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("timeout_ms", v.TimeoutMS), slog.Int("offset", v.Offset), slog.Int("length", v.Length), slog.Int("max_bytes", v.MaxBytes)}
 	case InteractWithProcessInput:
-		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("input_bytes", len(v.Input)), slog.Int("input_lines", lineCount(v.Input)), slog.Int("timeout_ms", v.TimeoutMS), slog.Bool("raw_input", v.RawInput)}
+		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("input_bytes", len(v.Input)), slog.Int("input_lines", lineCount(v.Input)), slog.Int("timeout_ms", v.TimeoutMS), slog.Bool("raw_input", v.RawInput), slog.Bool("has_operation_key", strings.TrimSpace(v.OperationKey) != "")}
 	case ResizePTYInput:
 		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("rows", v.Rows), slog.Int("cols", v.Cols)}
 	case PIDInput:
-		return []slog.Attr{slog.Int("pid", v.PID)}
+		attrs := []slog.Attr{slog.Int("pid", v.PID)}
+		if v.ExpectedStartTicks != 0 {
+			attrs = append(attrs, slog.Uint64("expected_start_ticks", v.ExpectedStartTicks))
+		}
+		return attrs
 	case ReadFileInput:
 		attrs := []slog.Attr{slog.Bool("is_url", v.IsURL), slog.Int("offset", v.Offset), slog.Int("length", v.Length)}
 		path := v.Path
@@ -98,6 +102,9 @@ func toolInputAttrs(in any) []slog.Attr {
 		return []slog.Attr{slog.Int("path_count", len(v.Paths)), slog.Any("paths_preview", preview), slog.Bool("paths_truncated", len(v.Paths) > maxPathPreviewItems)}
 	case WriteFileInput:
 		attrs := []slog.Attr{slog.Int("content_bytes", len(v.Content))}
+		if v.ExpectedSize != nil {
+			attrs = append(attrs, slog.Int64("expected_size", *v.ExpectedSize))
+		}
 		attrs = appendLogString(attrs, "path", v.Path, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "mode", v.Mode, maxMetadataLogBytes)
 		return attrs
