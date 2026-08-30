@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -26,6 +27,60 @@ func batchTestManager(t *testing.T, maxParallel int) *Manager {
 	m.resourceProbe = func() HostResources { return HostResources{CPUs: 8, MemoryAvailableB: 8 << 30} }
 	t.Cleanup(func() { _ = m.Close() })
 	return m
+}
+
+func TestManagerCloseWaitsForInFlightBatchLifecycle(t *testing.T) {
+	m := batchTestManager(t, 2)
+	workerDone := make(chan struct{})
+	m.batchMu.Lock()
+	m.batches["batch_inflight"] = &processBatch{id: "batch_inflight", state: BatchCanceled, done: workerDone}
+	m.batchMu.Unlock()
+
+	closed := make(chan error, 1)
+	go func() { closed <- m.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("manager close returned before in-flight batch lifecycle quiesced: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(workerDone)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("manager close did not finish after batch lifecycle quiesced")
+	}
+}
+
+func TestManagerCloseReapsSpawnedBatchProcesses(t *testing.T) {
+	m := batchTestManager(t, 2)
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{InitialWaitMS: 1, Jobs: []BatchJobRequest{
+		{ID: "a", Command: "sleep 30", PTY: PTYNever},
+		{ID: "b", Command: "sleep 30", PTY: PTYNever},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.Counts.Running == 2 })
+	pids := make([]int, 0, 2)
+	for _, job := range state.Jobs {
+		if job.PID > 0 {
+			pids = append(pids, job.PID)
+		}
+	}
+	if len(pids) != 2 {
+		t.Fatalf("expected two spawned batch processes: %+v", state.Jobs)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("batch process %d still exists after manager close: %v", pid, err)
+		}
+	}
 }
 
 func TestBatchHonorsConcurrencyLimit(t *testing.T) {

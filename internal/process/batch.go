@@ -139,6 +139,7 @@ type processBatch struct {
 	byID               map[string]*batchJob
 	notify             chan struct{}
 	cancelCh           chan struct{}
+	done               chan struct{}
 	idempotencyKeyHash string
 }
 
@@ -238,7 +239,7 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 	}
 	b := &processBatch{
 		id: id, maxParallel: maxParallel, createdAt: time.Now().UTC(), state: BatchRunning,
-		jobs: jobs, byID: make(map[string]*batchJob, len(jobs)), notify: make(chan struct{}), cancelCh: make(chan struct{}), idempotencyKeyHash: keyHash,
+		jobs: jobs, byID: make(map[string]*batchJob, len(jobs)), notify: make(chan struct{}), cancelCh: make(chan struct{}), done: make(chan struct{}), idempotencyKeyHash: keyHash,
 	}
 	for _, job := range jobs {
 		b.byID[job.req.ID] = job
@@ -366,6 +367,7 @@ func (m *Manager) CancelBatch(batchID string) (BatchCancelResult, error) {
 }
 
 func (m *Manager) runBatch(b *processBatch) {
+	defer close(b.done)
 	done := make(chan *batchJob, len(b.jobs))
 	running := 0
 	for {
@@ -970,6 +972,20 @@ func (m *Manager) cancelAllBatches() {
 	m.batchMu.Unlock()
 	for _, id := range ids {
 		_, _ = m.CancelBatch(id)
+	}
+}
+
+func (m *Manager) waitAllBatches() {
+	m.batchMu.Lock()
+	done := make([]<-chan struct{}, 0, len(m.batches))
+	for _, b := range m.batches {
+		if b.done != nil {
+			done = append(done, b.done)
+		}
+	}
+	m.batchMu.Unlock()
+	for _, ch := range done {
+		<-ch
 	}
 }
 

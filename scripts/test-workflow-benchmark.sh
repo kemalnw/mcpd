@@ -2,7 +2,13 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d); PID=""
-cleanup(){ [ -z "$PID" ] || kill "$PID" 2>/dev/null || true; rm -rf "$TMP"; }
+cleanup(){
+  if [ -n "$PID" ]; then
+    kill "$PID" 2>/dev/null || true
+    wait "$PID" 2>/dev/null || true
+  fi
+  rm -rf "$TMP"
+}
 trap cleanup EXIT HUP INT TERM
 PORT=$((22000 + $$ % 1000))
 cat >"$TMP/config.toml" <<EOF
