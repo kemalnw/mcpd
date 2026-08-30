@@ -74,10 +74,20 @@ type DirectoryEntry struct {
 	Hidden int    `json:"hidden,omitempty"`
 }
 
+type DirectoryRequest struct {
+	Path          string
+	Depth         int
+	MaxEntries    int
+	IncludePruned bool
+}
+
 type DirectoryResult struct {
-	Root    string           `json:"root"`
-	Depth   int              `json:"depth"`
-	Entries []DirectoryEntry `json:"entries"`
+	Root       string           `json:"root"`
+	Depth      int              `json:"depth"`
+	Entries    []DirectoryEntry `json:"entries"`
+	MaxEntries int              `json:"max_entries"`
+	Truncated  bool             `json:"truncated"`
+	Pruned     []string         `json:"pruned,omitempty"`
 }
 
 type MoveResult struct {

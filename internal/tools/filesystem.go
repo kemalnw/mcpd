@@ -20,7 +20,7 @@ func RegisterFilesystem(server *mcp.Server, manager *fsmgr.Manager, auditStore *
 	mcp.AddTool(server, tool("read_multiple_files", "Read multiple local files", "Use this when the exact paths of multiple local text files are already known and they can be read independently in one call. Prefer read_file for one file or paginated continuation, and start_search when you need to discover which files contain something.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "read_multiple_files", t.readMultipleFiles))
 	mcp.AddTool(server, tool("write_file", "Write or append a text file", "Use this to create a text file, replace its complete contents, or append text. mode defaults to rewrite; use append only when preserving existing content is intended. Prefer edit_block for a targeted change inside an existing file so unrelated content is not rewritten.", toolHints{destructive: true}), audited(auditStore, "write_file", t.writeFile))
 	mcp.AddTool(server, tool("create_directory", "Create a directory", "Use this to create a directory and any missing parent directories. It is additive and safe to repeat for the same path. Do not use start_process with mkdir when this dedicated tool is sufficient.", toolHints{idempotent: true}), audited(auditStore, "create_directory", t.createDirectory))
-	mcp.AddTool(server, tool("list_directory", "List directory contents", "Use this to inspect the entries under a known directory path, optionally recursively to depth. Prefer start_search when looking for a filename or content across a larger tree; prefer get_file_info for metadata about one known path.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_directory", t.listDirectory))
+	mcp.AddTool(server, tool("list_directory", "List directory contents", "Use this to inspect a known directory, optionally recursively. Recursive developer-noise directories are pruned by default and a global max_entries cap prevents response explosions; inspect pruned metadata or set includePruned=true only when dependency/cache internals are actually needed. Prefer start_search when looking for a filename or content across a larger tree.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_directory", t.listDirectory))
 	mcp.AddTool(server, tool("move_file", "Move or rename a path", "Use this to rename or move an existing file or directory with the operating-system rename operation. This changes filesystem state. Do not use it for copying; MCPD does not currently expose a dedicated copy tool.", toolHints{destructive: true}), audited(auditStore, "move_file", t.moveFile))
 	mcp.AddTool(server, tool("get_file_info", "Inspect file metadata", "Use this when you need metadata for one known file or directory—such as size, permissions, timestamps, detected type, and text line metadata—without reading its contents. Prefer read_file when content is needed and list_directory when inspecting children of a directory.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "get_file_info", t.getFileInfo))
 	mcp.AddTool(server, tool("edit_block", "Edit part of a file", "Use this for precise edits to an existing file. For one change, provide old_string and new_string. For a multi-hunk refactor, provide edits; MCPD validates every exact hunk and overlap before one write, so any validation failure leaves the file unchanged. Prefer this over write_file for localized source/config edits. If no exact match exists, inspect the returned closest-match hint before retrying.", toolHints{destructive: true}), audited(auditStore, "edit_block", t.editBlock))
@@ -60,8 +60,10 @@ type CreateDirectoryOutput struct {
 }
 
 type ListDirectoryInput struct {
-	Path  string `json:"path" jsonschema:"directory path to list"`
-	Depth int    `json:"depth,omitempty" jsonschema:"recursive depth; defaults to 2"`
+	Path          string `json:"path" jsonschema:"directory path to list"`
+	Depth         int    `json:"depth,omitempty" jsonschema:"recursive depth; defaults to 2"`
+	MaxEntries    int    `json:"maxEntries,omitempty" jsonschema:"global maximum returned entries; defaults to 1000"`
+	IncludePruned bool   `json:"includePruned,omitempty" jsonschema:"recurse into developer-noise directories normally pruned by default"`
 }
 
 type MoveFileInput struct {
@@ -110,7 +112,7 @@ func (t *FilesystemTools) createDirectory(_ context.Context, in CreateDirectoryI
 }
 
 func (t *FilesystemTools) listDirectory(ctx context.Context, in ListDirectoryInput) (fsmgr.DirectoryResult, error) {
-	return t.manager.ListDirectory(ctx, in.Path, in.Depth)
+	return t.manager.ListDirectoryWithOptions(ctx, fsmgr.DirectoryRequest{Path: in.Path, Depth: in.Depth, MaxEntries: in.MaxEntries, IncludePruned: in.IncludePruned})
 }
 
 func (t *FilesystemTools) moveFile(_ context.Context, in MoveFileInput) (fsmgr.MoveResult, error) {

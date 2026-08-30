@@ -225,9 +225,7 @@ Structured format creation will reuse this facade where the format supports it.
 ### `create_directory`, `move_file`, `list_directory`
 
 `create_directory` recursively creates missing parent directories.
-`move_file` uses native rename semantics. `list_directory` defaults to depth 2,
-returns every top-level entry, and caps each nested directory to the configured
-entry limit while returning the hidden count.
+`move_file` uses native rename semantics. `list_directory` defaults to depth 2, keeps the existing per-directory nested limit, prunes developer-noise trees such as `.git/objects`, `node_modules`, caches, and build outputs during recursive traversal, and enforces a global `maxEntries` cap (default 1000). The result reports `truncated` and `pruned` metadata. Set `includePruned=true` only when those normally skipped internals are explicitly needed; directly listing a pruned directory path remains allowed.
 
 ### `get_file_info`
 
