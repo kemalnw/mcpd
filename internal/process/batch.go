@@ -131,6 +131,7 @@ type batchJob struct {
 	session          *session
 	pid              int
 	state            BatchJobState
+	reserved         bool // selected by batch scheduler, not yet resource-admitted/spawned
 	err              string
 	changeGeneration uint64
 }
@@ -365,7 +366,7 @@ func (m *Manager) runBatch(b *processBatch) {
 			for running < b.maxParallel {
 				var ready *batchJob
 				for _, job := range b.jobs {
-					if job.state == BatchJobQueued && batchDependenciesComplete(b, job) {
+					if job.state == BatchJobQueued && !job.reserved && batchDependenciesComplete(b, job) {
 						ready = job
 						break
 					}
@@ -373,12 +374,11 @@ func (m *Manager) runBatch(b *processBatch) {
 				if ready == nil {
 					break
 				}
-				// Reserve synchronously so the scheduler cannot launch the same job
-				// twice while process creation is still in progress.
-				ready.state = BatchJobRunning
-				ready.changeGeneration++
+				// Reserve internally so the scheduler cannot launch the same job twice.
+				// Keep the model-facing state queued until resource admission succeeds
+				// and a managed process session/PID actually exists.
+				ready.reserved = true
 				running++
-				m.bumpBatchLocked(b)
 				go func(job *batchJob) {
 					m.runBatchJob(b, job)
 					done <- job
@@ -500,15 +500,21 @@ func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
 	weight := resourceWeight(job.req.ResourceClass, resources, m.globalLimiter.capacity)
 	if !m.globalLimiter.Acquire(weight, b.cancelCh) {
 		m.batchMu.Lock()
-		job.state = BatchJobCanceled
-		job.changeGeneration++
-		m.bumpBatchLocked(b)
+		job.reserved = false
+		if job.state != BatchJobCanceled {
+			job.state = BatchJobCanceled
+			job.changeGeneration++
+			m.bumpBatchLocked(b)
+		}
 		m.batchMu.Unlock()
 		return
 	}
 	defer m.globalLimiter.Release(weight)
 	m.batchMu.Lock()
-	canceled := b.canceled
+	canceled := b.canceled || job.state == BatchJobCanceled
+	if canceled {
+		job.reserved = false
+	}
 	m.batchMu.Unlock()
 	if canceled {
 		return
@@ -516,7 +522,8 @@ func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
 	s, err := m.startSession(job.req.Command, job.req.CWD, job.req.Shell, job.req.PTY, job.req.SeparateStreams)
 	if err != nil {
 		m.batchMu.Lock()
-		if b.canceled {
+		job.reserved = false
+		if b.canceled || job.state == BatchJobCanceled {
 			job.state = BatchJobCanceled
 		} else {
 			job.state = BatchJobStartFailed
@@ -528,11 +535,21 @@ func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
 		return
 	}
 	m.batchMu.Lock()
+	job.reserved = false
 	job.session = s
 	job.pid = s.pid
+	if b.canceled || job.state == BatchJobCanceled {
+		job.state = BatchJobCanceled
+	} else {
+		job.state = BatchJobRunning
+	}
 	job.changeGeneration++
 	m.bumpBatchLocked(b)
 	m.batchMu.Unlock()
+	if b.canceled || job.state == BatchJobCanceled {
+		_ = m.ForceTerminate(s.pid)
+		return
+	}
 
 	for {
 		ch := s.currentNotify()

@@ -240,3 +240,77 @@ func runningManagedSessions(m *Manager) int {
 	}
 	return count
 }
+
+func TestResourceWaitingJobRemainsQueuedUntilProcessExists(t *testing.T) {
+	m := resourceTestManager(t, 2, 2)
+	root := t.TempDir()
+	command := func(id string) string {
+		return "printf '" + id + "\\n' >> started; while [ ! -f release ]; do sleep 0.01; done"
+	}
+	batch, err := m.StartBatch(context.Background(), BatchStartRequest{MaxParallel: 2, Jobs: []BatchJobRequest{
+		{ID: "a", Command: command("a"), CWD: root, PTY: PTYNever, ResourceClass: ResourceHeavy},
+		{ID: "b", Command: command("b"), CWD: root, PTY: PTYNever, ResourceClass: ResourceHeavy},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStartedLines(t, filepath.Join(root, "started"), 1)
+	snapshot, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: batch.BatchID, OnlyChanged: false, Length: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Counts.Running != 1 || snapshot.Counts.Queued != 1 {
+		t.Fatalf("resource admission state lied about concurrency: counts=%+v jobs=%+v", snapshot.Counts, snapshot.Jobs)
+	}
+	for _, job := range snapshot.Jobs {
+		if job.State == BatchJobRunning && job.PID <= 0 {
+			t.Fatalf("running job has no PID: %+v", job)
+		}
+		if job.State == BatchJobQueued && job.PID != 0 {
+			t.Fatalf("queued job unexpectedly has PID: %+v", job)
+		}
+	}
+	if _, err := m.CancelBatch(batch.BatchID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGlobalRunningCountsMatchAdmittedSessionsAcrossBatches(t *testing.T) {
+	m := resourceTestManager(t, 2, 2)
+	root := t.TempDir()
+	command := func(id string) string {
+		return "printf '" + id + "\\n' >> started; while [ ! -f release ]; do sleep 0.01; done"
+	}
+	one, err := m.StartBatch(context.Background(), BatchStartRequest{MaxParallel: 2, Jobs: []BatchJobRequest{
+		{ID: "a", Command: command("a"), CWD: root, PTY: PTYNever, ResourceClass: ResourceIO},
+		{ID: "b", Command: command("b"), CWD: root, PTY: PTYNever, ResourceClass: ResourceIO},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := m.StartBatch(context.Background(), BatchStartRequest{MaxParallel: 2, Jobs: []BatchJobRequest{
+		{ID: "c", Command: command("c"), CWD: root, PTY: PTYNever, ResourceClass: ResourceIO},
+		{ID: "d", Command: command("d"), CWD: root, PTY: PTYNever, ResourceClass: ResourceIO},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStartedLines(t, filepath.Join(root, "started"), 2)
+	a, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: one.BatchID, OnlyChanged: false, Length: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: two.BatchID, OnlyChanged: false, Length: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, live := a.Counts.Running+b.Counts.Running, runningManagedSessions(m); got != live || got != 2 {
+		t.Fatalf("reported running=%d live sessions=%d; batch1=%+v batch2=%+v", got, live, a.Counts, b.Counts)
+	}
+	if _, err := m.CancelBatch(two.BatchID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CancelBatch(one.BatchID); err != nil {
+		t.Fatal(err)
+	}
+}
