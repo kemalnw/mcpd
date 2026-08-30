@@ -50,9 +50,10 @@ type BatchJobRequest struct {
 }
 
 type BatchStartRequest struct {
-	Jobs          []BatchJobRequest
-	MaxParallel   int
-	InitialWaitMS int
+	Jobs           []BatchJobRequest
+	MaxParallel    int
+	InitialWaitMS  int
+	IdempotencyKey string
 }
 
 type BatchReadRequest struct {
@@ -94,14 +95,15 @@ type BatchCounts struct {
 }
 
 type BatchResult struct {
-	BatchID     string           `json:"batch_id"`
-	State       BatchState       `json:"state"`
-	Generation  uint64           `json:"generation"`
-	MaxParallel int              `json:"max_parallel"`
-	Counts      BatchCounts      `json:"counts"`
-	Jobs        []BatchJobResult `json:"jobs,omitempty"`
-	Cursor      string           `json:"cursor"`
-	Resources   HostResources    `json:"resources"`
+	BatchID          string           `json:"batch_id"`
+	State            BatchState       `json:"state"`
+	Generation       uint64           `json:"generation"`
+	MaxParallel      int              `json:"max_parallel"`
+	Counts           BatchCounts      `json:"counts"`
+	Jobs             []BatchJobResult `json:"jobs,omitempty"`
+	Cursor           string           `json:"cursor"`
+	Resources        HostResources    `json:"resources"`
+	IdempotentReplay bool             `json:"idempotent_replay,omitempty"`
 }
 
 type BatchCancelResult struct {
@@ -111,16 +113,17 @@ type BatchCancelResult struct {
 }
 
 type processBatch struct {
-	id          string
-	maxParallel int
-	createdAt   time.Time
-	state       BatchState
-	generation  uint64
-	canceled    bool
-	jobs        []*batchJob
-	byID        map[string]*batchJob
-	notify      chan struct{}
-	cancelCh    chan struct{}
+	id                 string
+	maxParallel        int
+	createdAt          time.Time
+	state              BatchState
+	generation         uint64
+	canceled           bool
+	jobs               []*batchJob
+	byID               map[string]*batchJob
+	notify             chan struct{}
+	cancelCh           chan struct{}
+	idempotencyKeyHash string
 }
 
 type batchJob struct {
@@ -148,6 +151,10 @@ type batchJobCursor struct {
 func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchResult, error) {
 	if len(req.Jobs) < 2 {
 		return BatchResult{}, errors.New("batch requires at least two independent jobs")
+	}
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if err := validateBatchIdempotencyKey(idempotencyKey); err != nil {
+		return BatchResult{}, err
 	}
 	maxParallel := req.MaxParallel
 	if maxParallel == 0 {
@@ -191,18 +198,49 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 	if err := validateBatchDAG(jobs); err != nil {
 		return BatchResult{}, err
 	}
+	var keyHash, fingerprint string
+	if idempotencyKey != "" {
+		canonicalJobs := make([]BatchJobRequest, 0, len(jobs))
+		for _, job := range jobs {
+			canonicalJobs = append(canonicalJobs, job.req)
+		}
+		var err error
+		fingerprint, err = batchRequestFingerprint(canonicalJobs, maxParallel)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		keyHash = batchIdempotencyKeyHash(idempotencyKey)
+	}
 	id, err := newBatchID()
 	if err != nil {
 		return BatchResult{}, err
 	}
 	b := &processBatch{
 		id: id, maxParallel: maxParallel, createdAt: time.Now().UTC(), state: BatchRunning,
-		jobs: jobs, byID: make(map[string]*batchJob, len(jobs)), notify: make(chan struct{}), cancelCh: make(chan struct{}),
+		jobs: jobs, byID: make(map[string]*batchJob, len(jobs)), notify: make(chan struct{}), cancelCh: make(chan struct{}), idempotencyKeyHash: keyHash,
 	}
 	for _, job := range jobs {
 		b.byID[job.req.ID] = job
 	}
-	m.addBatch(b)
+	if keyHash != "" {
+		m.batchMu.Lock()
+		if record, ok := m.batchIdempotency[keyHash]; ok {
+			if record.Fingerprint != fingerprint {
+				m.batchMu.Unlock()
+				return BatchResult{}, ErrBatchIdempotencyConflict
+			}
+			if existing := m.batches[record.BatchID]; existing != nil {
+				m.batchMu.Unlock()
+				return m.readBatchReplaySnapshot(existing, defaultBatchReadLines), nil
+			}
+			delete(m.batchIdempotency, keyHash)
+		}
+		m.batches[b.id] = b
+		m.batchIdempotency[keyHash] = batchIdempotencyRecord{Fingerprint: fingerprint, BatchID: b.id}
+		m.batchMu.Unlock()
+	} else {
+		m.addBatch(b)
+	}
 	go m.runBatch(b)
 
 	if waitMS > 0 {
@@ -745,6 +783,9 @@ func (m *Manager) markBatchCompleted(id string) {
 	for len(m.completedBatches) > m.opts.CompletedSessions {
 		oldest := m.completedBatches[0]
 		m.completedBatches = m.completedBatches[1:]
+		if batch := m.batches[oldest]; batch != nil && batch.idempotencyKeyHash != "" {
+			delete(m.batchIdempotency, batch.idempotencyKeyHash)
+		}
 		delete(m.batches, oldest)
 	}
 }

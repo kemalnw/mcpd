@@ -54,9 +54,10 @@ type BatchProcessJobInput struct {
 }
 
 type StartProcessBatchInput struct {
-	Jobs          []BatchProcessJobInput `json:"jobs" jsonschema:"two or more independent non-interactive jobs to schedule"`
-	MaxParallel   int                    `json:"max_parallel,omitempty" jsonschema:"requested concurrency; capped by process.batch_max_parallel"`
-	InitialWaitMS int                    `json:"initial_wait_ms,omitempty" jsonschema:"milliseconds to wait for the first batch state/output change; defaults to 40"`
+	Jobs           []BatchProcessJobInput `json:"jobs" jsonschema:"two or more independent non-interactive jobs to schedule"`
+	MaxParallel    int                    `json:"max_parallel,omitempty" jsonschema:"requested concurrency; capped by process.batch_max_parallel"`
+	InitialWaitMS  int                    `json:"initial_wait_ms,omitempty" jsonschema:"milliseconds to wait for the first batch state/output change; defaults to 40"`
+	IdempotencyKey string                 `json:"idempotency_key,omitempty" jsonschema:"optional retry-safety key; equivalent retries return the existing batch instead of executing twice"`
 }
 
 type ReadProcessBatchInput struct {
@@ -123,7 +124,7 @@ func (t *ProcessTools) startBatch(ctx context.Context, in StartProcessBatchInput
 	for _, job := range in.Jobs {
 		jobs = append(jobs, processmgr.BatchJobRequest{ID: job.ID, Command: job.Command, CWD: job.CWD, Shell: job.Shell, PTY: processmgr.PTYMode(job.PTY), SeparateStreams: job.SeparateStreams, DependsOn: job.DependsOn, ResourceClass: processmgr.ResourceClass(job.ResourceClass)})
 	}
-	return t.manager.StartBatch(ctx, processmgr.BatchStartRequest{Jobs: jobs, MaxParallel: in.MaxParallel, InitialWaitMS: in.InitialWaitMS})
+	return t.manager.StartBatch(ctx, processmgr.BatchStartRequest{Jobs: jobs, MaxParallel: in.MaxParallel, InitialWaitMS: in.InitialWaitMS, IdempotencyKey: in.IdempotencyKey})
 }
 
 func (t *ProcessTools) readBatch(ctx context.Context, in ReadProcessBatchInput) (processmgr.BatchResult, error) {

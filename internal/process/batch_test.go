@@ -4,9 +4,11 @@ package process
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -372,4 +374,101 @@ func batchLines(result BatchResult) []string {
 		out = append(out, job.Lines...)
 	}
 	return out
+}
+
+func TestBatchIdempotencyConcurrentRetriesCreateOneLogicalBatch(t *testing.T) {
+	m := batchTestManager(t, 2)
+	root := t.TempDir()
+	req := BatchStartRequest{IdempotencyKey: "transport-retry-123", Jobs: []BatchJobRequest{
+		{ID: "a", Command: "printf 'a\\n' >> started; sleep 0.05", CWD: root, PTY: PTYNever},
+		{ID: "b", Command: "printf 'b\\n' >> started; sleep 0.05", CWD: root, PTY: PTYNever},
+	}}
+	const callers = 16
+	var wg sync.WaitGroup
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := m.StartBatch(context.Background(), req)
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- result.BatchID
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	var batchID string
+	for id := range ids {
+		if batchID == "" {
+			batchID = id
+		}
+		if id != batchID {
+			t.Fatalf("duplicate logical batches: %s != %s", id, batchID)
+		}
+	}
+	waitForBatchState(t, m, batchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	data, err := os.ReadFile(filepath.Join(root, "started"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(strings.Fields(string(data))); got != 2 {
+		t.Fatalf("idempotent retries executed duplicate jobs: lines=%d data=%q", got, data)
+	}
+}
+
+func TestBatchIdempotencyRetryReturnsSameHandleWithoutConsumingProcessOutput(t *testing.T) {
+	m := batchTestManager(t, 2)
+	req := BatchStartRequest{IdempotencyKey: "lost-response", Jobs: []BatchJobRequest{
+		{ID: "a", Command: "printf 'alpha\\n'", PTY: PTYNever},
+		{ID: "b", Command: "printf 'beta\\n'", PTY: PTYNever},
+	}}
+	first, err := m.StartBatch(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForBatchState(t, m, first.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	replay, err := m.StartBatch(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.BatchID != first.BatchID || !replay.IdempotentReplay {
+		t.Fatalf("retry did not return same logical operation: first=%+v replay=%+v", first, replay)
+	}
+	var pid int
+	for _, job := range replay.Jobs {
+		if job.ID == "a" {
+			pid = job.PID
+		}
+	}
+	if pid == 0 {
+		t.Fatalf("replay lacks managed PID: %+v", replay)
+	}
+	out, err := m.ReadOutput(context.Background(), OutputRequest{PID: pid, Offset: 0, Length: 10, TimeoutMS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(out.Lines, ",") != "alpha" {
+		t.Fatalf("idempotency replay consumed per-process output cursor: %+v", out)
+	}
+}
+
+func TestBatchIdempotencyRejectsConflictingKeyReuse(t *testing.T) {
+	m := batchTestManager(t, 2)
+	first := BatchStartRequest{IdempotencyKey: "same-key", Jobs: []BatchJobRequest{{ID: "a", Command: "true"}, {ID: "b", Command: "true"}}}
+	if _, err := m.StartBatch(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Jobs = []BatchJobRequest{{ID: "a", Command: "printf changed"}, {ID: "b", Command: "true"}}
+	if _, err := m.StartBatch(context.Background(), second); !errors.Is(err, ErrBatchIdempotencyConflict) {
+		t.Fatalf("conflicting key reuse error=%v", err)
+	}
 }
