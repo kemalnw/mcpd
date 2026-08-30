@@ -26,17 +26,19 @@ import (
 )
 
 type App struct {
-	cfg       config.Config
-	logger    *slog.Logger
-	audit     *audit.Store
-	processes *processmgr.Manager
-	files     *fsmgr.Manager
-	searches  *searchmgr.Manager
-	workflows *workflowmgr.Store
-	durable   *durablemgr.Manager
-	oauth     *oauthsrv.Server
-	mcp       *mcp.Server
-	http      *http.Server
+	cfg              config.Config
+	logger           *slog.Logger
+	audit            *audit.Store
+	processes        *processmgr.Manager
+	files            *fsmgr.Manager
+	searches         *searchmgr.Manager
+	workflows        *workflowmgr.Store
+	workflowGCCancel context.CancelFunc
+	workflowGCDone   chan struct{}
+	durable          *durablemgr.Manager
+	oauth            *oauthsrv.Server
+	mcp              *mcp.Server
+	http             *http.Server
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -146,7 +148,7 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 	tools.RegisterProcess(server, processes, auditStore)
 	tools.RegisterFilesystem(server, files, auditStore)
 	tools.RegisterSearch(server, searches, auditStore)
-	tools.RegisterWorkflow(server, workflowStore, auditStore, time.Duration(cfg.Workflow.CheckpointIntervalSeconds)*time.Second)
+	tools.RegisterWorkflow(server, workflowStore, auditStore, time.Duration(cfg.Workflow.CheckpointIntervalSeconds)*time.Second, time.Duration(cfg.Workflow.CompletedRetentionSeconds)*time.Second, cfg.Workflow.GarbageCollectMaxDeletes)
 	tools.RegisterDurable(server, durableManager, auditStore)
 
 	streamableOpts := &mcp.StreamableHTTPOptions{
@@ -198,7 +200,10 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mcpd", "version": v.Version, "mcp": cfg.Server.MCPPath, "oauth": authServer != nil, "tool_catalog_version": tools.CatalogVersion, "tool_catalog_fingerprint": catalogFingerprint})
 	})
 
-	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, searches: searches, workflows: workflowStore, durable: durableManager, oauth: authServer, mcp: server}
+	gcCtx, gcCancel := context.WithCancel(context.Background())
+	gcDone := make(chan struct{})
+	go runWorkflowGarbageCollector(gcCtx, gcDone, workflowStore, logger, time.Duration(cfg.Workflow.GarbageCollectIntervalSeconds)*time.Second, time.Duration(cfg.Workflow.CompletedRetentionSeconds)*time.Second, cfg.Workflow.GarbageCollectMaxDeletes)
+	a := &App{cfg: cfg, logger: logger, audit: auditStore, processes: processes, files: files, searches: searches, workflows: workflowStore, workflowGCCancel: gcCancel, workflowGCDone: gcDone, durable: durableManager, oauth: authServer, mcp: server}
 	a.http = &http.Server{
 		Addr: cfg.Server.Listen, Handler: accessLog(logger, mux),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second,
@@ -217,6 +222,18 @@ func (a *App) Run() error {
 
 func (a *App) Shutdown(ctx context.Context) error {
 	var first error
+	if a.workflowGCCancel != nil {
+		a.workflowGCCancel()
+	}
+	if a.workflowGCDone != nil {
+		select {
+		case <-a.workflowGCDone:
+		case <-ctx.Done():
+			if first == nil {
+				first = ctx.Err()
+			}
+		}
+	}
 	if err := a.http.Shutdown(ctx); err != nil {
 		first = err
 	}
@@ -230,6 +247,31 @@ func (a *App) Shutdown(ctx context.Context) error {
 		first = err
 	}
 	return first
+}
+
+func runWorkflowGarbageCollector(ctx context.Context, done chan<- struct{}, store *workflowmgr.Store, logger *slog.Logger, interval, retention time.Duration, maxDeletes int) {
+	defer close(done)
+	collect := func() {
+		result, err := store.CollectGarbage(workflowmgr.GCPolicy{CompletedRetention: retention, MaxDeletes: maxDeletes})
+		if err != nil {
+			logger.Error("workflow garbage collection failed", "error", err)
+			return
+		}
+		if result.DeletedRuns > 0 || result.PrunedIdempotencyRecords > 0 || result.PrunedExpiredLeases > 0 || result.CleanedTrashEntries > 0 {
+			logger.Info("workflow garbage collection completed", "deleted_runs", result.DeletedRuns, "deleted_bytes", result.DeletedBytes, "pruned_idempotency_records", result.PrunedIdempotencyRecords, "pruned_expired_leases", result.PrunedExpiredLeases, "cleaned_trash_entries", result.CleanedTrashEntries)
+		}
+	}
+	collect()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			collect()
+		}
+	}
 }
 
 type responseMetricsWriter struct {

@@ -154,3 +154,24 @@ func TestDecodeRejectsRemovedTLSSection(t *testing.T) {
 		t.Fatalf("expected removed TLS migration error, got %v", err)
 	}
 }
+
+func TestWorkflowRetentionDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	if cfg.Workflow.CompletedRetentionSeconds != 30*24*60*60 || cfg.Workflow.GarbageCollectIntervalSeconds != 60*60 || cfg.Workflow.GarbageCollectMaxDeletes != 100 {
+		t.Fatalf("workflow GC defaults=%+v", cfg.Workflow)
+	}
+	cfg.Workflow.CompletedRetentionSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("zero completed retention accepted")
+	}
+	cfg = Default()
+	cfg.Workflow.GarbageCollectIntervalSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("zero GC interval accepted")
+	}
+	cfg = Default()
+	cfg.Workflow.GarbageCollectMaxDeletes = 1001
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("oversized GC delete bound accepted")
+	}
+}
