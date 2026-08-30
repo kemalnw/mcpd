@@ -67,15 +67,16 @@ func (s *Store) Create(req CreateRequest) (Run, error) {
 	}
 	now := s.now()
 	run := Run{
-		SchemaVersion:   SchemaVersion,
-		ID:              id,
-		Revision:        1,
-		Title:           strings.TrimSpace(req.Title),
-		Objective:       strings.TrimSpace(req.Objective),
-		SuccessCriteria: append([]string(nil), req.SuccessCriteria...),
-		State:           RunPlanned,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		SchemaVersion:    SchemaVersion,
+		ID:               id,
+		Revision:         1,
+		Title:            strings.TrimSpace(req.Title),
+		Objective:        strings.TrimSpace(req.Objective),
+		SuccessCriteria:  append([]string(nil), req.SuccessCriteria...),
+		State:            RunPlanned,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		LastCheckpointAt: now,
 	}
 	lock, releaseLock := s.runLocks.Acquire(id)
 	lock.Lock()
@@ -429,6 +430,19 @@ func cloneRun(run Run) Run {
 	run.Items = append([]WorkItem(nil), run.Items...)
 	for i := range run.Items {
 		run.Items[i].DependsOn = append([]string(nil), run.Items[i].DependsOn...)
+	}
+	if run.Handoff != nil {
+		handoff := *run.Handoff
+		handoff.Blockers = append([]string(nil), handoff.Blockers...)
+		handoff.Evidence = append([]EvidenceReference(nil), handoff.Evidence...)
+		handoff.ActiveHandles = append([]ActiveHandle(nil), handoff.ActiveHandles...)
+		handoff.ActiveSideEffects = append([]string(nil), handoff.ActiveSideEffects...)
+		handoff.PendingApprovals = append([]string(nil), handoff.PendingApprovals...)
+		handoff.DoNotRepeat = append([]string(nil), handoff.DoNotRepeat...)
+		handoff.CleanupState = append([]string(nil), handoff.CleanupState...)
+		handoff.Recommendations = append([]Recommendation(nil), handoff.Recommendations...)
+		handoff.NextActions = append([]string(nil), handoff.NextActions...)
+		run.Handoff = &handoff
 	}
 	return run
 }

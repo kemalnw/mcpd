@@ -35,6 +35,9 @@ initial_wait_ms = 40
 # Durable engineering run/checkpoint state and disk-backed job logs.
 # Defaults to the MCPD state directory under "runs".
 # state_dir = "/var/lib/mcpd/runs"
+# Advisory age after which resume/status marks a checkpoint due. Agents should
+# also checkpoint before long waits and before an anticipated session/turn limit.
+checkpoint_interval_seconds = 900
 
 [audit]
 enabled = true
