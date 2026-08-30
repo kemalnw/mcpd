@@ -192,6 +192,7 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 		// openid scope or ID-token support; mcpd remains an OAuth AS, not an OIDC OP.
 		mux.HandleFunc("GET /.well-known/openid-configuration", authServer.AuthorizationServerMetadata)
 		mux.HandleFunc("GET /oauth/jwks.json", authServer.JWKS)
+		mux.HandleFunc("GET /oauth/assets/mcpd-signal-core.webp", authServer.Brand)
 		mux.HandleFunc("GET /oauth/authorize", authServer.Authorize)
 		mux.HandleFunc("POST /oauth/authorize", authServer.Authorize)
 		mux.HandleFunc("POST /oauth/token", authServer.Token)

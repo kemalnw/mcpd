@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -255,6 +254,20 @@ func (s *Server) authorizePOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.PostForm.Get("decision") == "cancel" {
+		s.logger.Info("oauth authorization denied", "client_id", pending.ClientID, "resource", pending.Resource, "scope", pending.Scope)
+		location, err := authorizationRedirect(pending.RedirectURI, map[string]string{
+			"error": "access_denied", "error_description": "resource owner denied the request",
+			"state": pending.State, "iss": s.opts.IssuerURL,
+		})
+		if err != nil {
+			http.Error(w, "invalid redirect URI", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, location, http.StatusFound)
+		return
+	}
+
 	if !verifyPassword(s.passwordHash, []byte(r.PostForm.Get("password"))) {
 		pending.Attempts++
 		s.logger.Warn("oauth authorization rejected", "client_id", pending.ClientID, "reason", "invalid_owner_password", "attempt", pending.Attempts)
@@ -414,7 +427,7 @@ func authorizationRedirect(raw string, values map[string]string) (string, error)
 
 func (s *Server) renderLogin(w http.ResponseWriter, txn string, pending *pendingAuthorization, message string) {
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Frame-Options", "DENY")
@@ -425,8 +438,6 @@ func (s *Server) renderLogin(w http.ResponseWriter, txn string, pending *pending
 	}
 	_ = loginTemplate.Execute(w, map[string]string{"Transaction": txn, "Client": name, "Scope": pending.Scope, "Resource": pending.Resource, "Message": message})
 }
-
-var loginTemplate = template.Must(template.New("login").Parse(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize mcpd</title><style>body{font:16px system-ui;max-width:38rem;margin:5rem auto;padding:0 1rem}label,input,button{display:block;width:100%;box-sizing:border-box}input,button{padding:.75rem;margin:.5rem 0 1rem}code{overflow-wrap:anywhere}.err{color:#b42318}</style></head><body><h1>Authorize mcpd</h1><p>Client: <strong>{{.Client}}</strong></p><p>Resource: <code>{{.Resource}}</code></p><p>Scopes: <code>{{.Scope}}</code></p>{{if .Message}}<p class="err">{{.Message}}</p>{{end}}<form method="post" action="/oauth/authorize"><input type="hidden" name="transaction" value="{{.Transaction}}"><label>Owner password<input type="password" name="password" autocomplete="current-password" required autofocus></label><button type="submit">Authorize</button></form></body></html>`))
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")

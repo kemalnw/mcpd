@@ -70,7 +70,22 @@ func TestAuthorizationCodePKCEFlow(t *testing.T) {
 			t.Fatalf("authorization CSP missing %q: %q", want, csp)
 		}
 	}
-	match := regexp.MustCompile(`name="transaction" value="([^"]+)"`).FindStringSubmatch(rec.Body.String())
+	page := rec.Body.String()
+	for _, want := range []string{
+		`viewport-fit=cover`,
+		`aria-labelledby="page-title"`,
+		`/oauth/assets/mcpd-signal-core.webp`,
+		`Authorize access`,
+		`autocomplete="current-password"`,
+		`name="decision" value="cancel"`,
+		`@media (max-width: 620px)`,
+		`@media (prefers-reduced-motion: reduce)`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("authorization page missing production UI marker %q", want)
+		}
+	}
+	match := regexp.MustCompile(`name="transaction" value="([^"]+)"`).FindStringSubmatch(page)
 	if len(match) != 2 {
 		t.Fatalf("authorization page lacks transaction: %s", rec.Body.String())
 	}
@@ -123,6 +138,31 @@ func TestAuthorizationCodePKCEFlow(t *testing.T) {
 	}
 	if _, err := s.VerifyBearer(tokenResponse.AccessToken, ScopeWrite); err == nil {
 		t.Fatal("read-only token unexpectedly has write scope")
+	}
+
+	// A cancellation consumes the authorization transaction and redirects with the
+	// OAuth access_denied error instead of asking for the owner password.
+	req = httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+params.Encode(), nil)
+	rec = httptest.NewRecorder()
+	s.Authorize(rec, req)
+	cancelMatch := regexp.MustCompile(`name="transaction" value="([^"]+)"`).FindStringSubmatch(rec.Body.String())
+	if len(cancelMatch) != 2 {
+		t.Fatalf("cancel authorization page lacks transaction: %s", rec.Body.String())
+	}
+	cancelForm := url.Values{"transaction": {cancelMatch[1]}, "decision": {"cancel"}}
+	req = httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(cancelForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	s.Authorize(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("cancel authorize POST = %d: %s", rec.Code, rec.Body.String())
+	}
+	cancelLocation, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelLocation.Query().Get("error") != "access_denied" || cancelLocation.Query().Get("state") != "state-123" {
+		t.Fatalf("unexpected cancel callback: %s", cancelLocation.String())
 	}
 
 	// Authorization codes are one-time credentials.
@@ -240,6 +280,23 @@ func TestAuthorizePageSetsBrowserSecurityHeaders(t *testing.T) {
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("X-Frame-Options") != "DENY" || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
 		t.Fatalf("missing browser security headers: %#v", rec.Header())
+	}
+}
+
+func TestBrandServesEmbeddedWebP(t *testing.T) {
+	rec := httptest.NewRecorder()
+	(&Server{}).Brand(rec, httptest.NewRequest(http.MethodGet, "/oauth/assets/mcpd-signal-core.webp", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("brand = %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/webp" {
+		t.Fatalf("brand content type = %q", got)
+	}
+	if !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
+		t.Fatalf("brand cache control = %q", rec.Header().Get("Cache-Control"))
+	}
+	if body := rec.Body.Bytes(); len(body) < 12 || string(body[:4]) != "RIFF" || string(body[8:12]) != "WEBP" {
+		t.Fatalf("brand response is not WebP: %x", body[:min(len(body), 12)])
 	}
 }
 
