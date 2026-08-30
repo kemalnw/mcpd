@@ -184,6 +184,26 @@ func waitForSessionExit(t *testing.T, m *Manager, pid int, timeout time.Duration
 	}
 }
 
+func TestPromptLikeHistoricalOutputDoesNotBlockProcess(t *testing.T) {
+	for _, mode := range []PTYMode{PTYNever, PTYAlways} {
+		t.Run(string(mode), func(t *testing.T) {
+			m := testManager(t)
+			result, err := m.Start(context.Background(), StartRequest{
+				Command: "printf 'build step $ \\nstill running\\n'; sleep 10", TimeoutMS: 500, PTY: mode,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.WaitingForInput || result.State == StateWaiting {
+				t.Fatalf("historical prompt-like output caused waiting state: %+v", result)
+			}
+			if err := m.ForceTerminate(result.PID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestInteractivePTY(t *testing.T) {
 	m := testManager(t)
 	result, err := m.Start(context.Background(), StartRequest{
