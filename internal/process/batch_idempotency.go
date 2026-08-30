@@ -49,8 +49,8 @@ func batchRequestFingerprint(jobs []BatchJobRequest, effectiveMaxParallel int) (
 // readBatchReplaySnapshot returns a fresh caller-owned observation cursor. A
 // retry after a lost start response returns the same logical batch but never
 // consumes another agent's progress because batch cursors are stateless/caller-owned.
-func (m *Manager) readBatchReplaySnapshot(b *processBatch, length int) BatchResult {
-	result := m.readBatchSnapshot(b, false, length, batchCursor{Version: 1, BatchID: b.id, Jobs: make(map[string]batchJobCursor)})
+func (m *Manager) readBatchReplaySnapshot(b *processBatch, length int, outputMode BatchOutputMode) BatchResult {
+	result := m.readBatchSnapshot(b, false, length, m.opts.ResponseOutputBytes, outputMode, batchCursor{Version: 1, BatchID: b.id, Jobs: make(map[string]batchJobCursor)})
 	result.IdempotentReplay = true
 	return result
 }

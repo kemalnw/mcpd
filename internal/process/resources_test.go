@@ -314,3 +314,30 @@ func TestGlobalRunningCountsMatchAdmittedSessionsAcrossBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCancelRacingSpawnPublishesConsistentTerminalState(t *testing.T) {
+	for iteration := 0; iteration < 50; iteration++ {
+		m := resourceTestManager(t, 1, 1)
+		root := t.TempDir()
+		batch, err := m.StartBatch(context.Background(), BatchStartRequest{MaxParallel: 1, Jobs: []BatchJobRequest{
+			{ID: "race-a", Command: "sleep 30", CWD: root, PTY: PTYNever, ResourceClass: ResourceIO},
+			{ID: "race-b", Command: "sleep 30", CWD: root, PTY: PTYNever, ResourceClass: ResourceIO},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.CancelBatch(batch.BatchID); err != nil {
+			t.Fatal(err)
+		}
+		final := waitForBatchState(t, m, batch.BatchID, func(r BatchResult) bool { return r.State != BatchRunning })
+		if final.State != BatchCanceled || final.Counts.Running != 0 || final.Counts.Waiting != 0 {
+			t.Fatalf("iteration %d inconsistent canceled batch: %+v", iteration, final)
+		}
+		for _, job := range final.Jobs {
+			if job.State != BatchJobCanceled {
+				t.Fatalf("iteration %d job escaped cancellation: %+v", iteration, job)
+			}
+		}
+		_ = m.Close()
+	}
+}

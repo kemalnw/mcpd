@@ -474,3 +474,158 @@ func TestBatchIdempotencyRejectsConflictingKeyReuse(t *testing.T) {
 		t.Fatalf("conflicting key reuse error=%v", err)
 	}
 }
+
+func TestBatchFreshFailureReturnsBoundedTailAndPreservesPIDOutput(t *testing.T) {
+	m, err := NewManager(Options{
+		DefaultShell: "/bin/bash", DefaultWaitMS: 100, InitialOutputLines: 20,
+		ResponseOutputBytes: 4096, FailureTailLines: 10,
+		OutputBufferBytes: 4 << 20, MaxLineBytes: 1 << 20, CompletedSessions: 20,
+		BatchMaxParallel: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	cmd := `python3 -c "import sys; [print(f'line-{i:04d}-'+'x'*100) for i in range(500)]; print('FAIL-MARKER'); sys.exit(7)"`
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{InitialWaitMS: 1000, Jobs: []BatchJobRequest{
+		{ID: "fail", Command: cmd, PTY: PTYNever}, {ID: "ok", Command: "true", PTY: PTYNever},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.State != BatchCompleted {
+		start = waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	}
+	// Take a fresh snapshot after terminal state so failure-tail semantics apply
+	// deterministically even when the start call returned before process exit.
+	fresh, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: false, Length: 1000, MaxBytesPerJob: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failed BatchJobResult
+	for _, job := range fresh.Jobs {
+		if job.ID == "fail" {
+			failed = job
+		}
+	}
+	if !failed.FailureTail || !failed.OutputTruncated || failed.OmittedBefore == 0 || failed.BytesReturned > 4096 || failed.Remaining != 0 {
+		t.Fatalf("failure tail metadata=%+v", failed)
+	}
+	if !strings.Contains(strings.Join(failed.Lines, "\n"), "FAIL-MARKER") {
+		t.Fatalf("failure tail missed terminal evidence: %+v", failed.Lines)
+	}
+	pidOut, err := m.ReadOutput(context.Background(), OutputRequest{PID: failed.PID, Offset: 0, Length: 2, MaxBytes: 1 << 20, TimeoutMS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pidOut.Lines) == 0 || !strings.HasPrefix(pidOut.Lines[0], "line-0000-") {
+		t.Fatalf("batch failure-tail consumed independent PID history: %+v", pidOut)
+	}
+}
+
+func TestBatchFailuresModeSuppressesNoisySuccessOutput(t *testing.T) {
+	m := batchTestManager(t, 2)
+	noisy := `python3 -c "[print('noise-%04d-'%i+'x'*100) for i in range(300)]"`
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{OutputMode: BatchOutputFailures, InitialWaitMS: 1, Jobs: []BatchJobRequest{
+		{ID: "a", Command: noisy, PTY: PTYNever}, {ID: "b", Command: noisy, PTY: PTYNever},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range start.Jobs {
+		if len(job.Lines) != 0 || len(job.Streams) != 0 {
+			t.Fatalf("failures mode leaked running/success output: %+v", job)
+		}
+	}
+	cursor := start.Cursor
+	result := start
+	for result.State == BatchRunning {
+		result, err = m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, Cursor: cursor, OnlyChanged: true, OutputMode: BatchOutputFailures, TimeoutMS: 5000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor = result.Cursor
+		for _, job := range result.Jobs {
+			if job.State == BatchJobCompleted && (len(job.Lines) != 0 || len(job.Streams) != 0) {
+				t.Fatalf("failures mode leaked completed output: %+v", job)
+			}
+		}
+	}
+	if result.Counts.Completed != 2 {
+		t.Fatalf("noisy success batch=%+v", result)
+	}
+}
+
+func TestBatchFailuresModeReturnsFailureTailAfterSuppressingRunningOutput(t *testing.T) {
+	m := batchTestManager(t, 2)
+	cmd := `python3 -c "import sys,time; [print('noise-%04d-'%i+'x'*80) for i in range(300)]; time.sleep(.03); print('FINAL-FAIL'); sys.exit(9)"`
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{OutputMode: BatchOutputFailures, InitialWaitMS: 1, Jobs: []BatchJobRequest{
+		{ID: "fail", Command: cmd, PTY: PTYNever}, {ID: "ok", Command: "sleep .02; true", PTY: PTYNever},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := start.Cursor
+	result := start
+	foundTail := false
+	for result.State == BatchRunning {
+		result, err = m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, Cursor: cursor, OnlyChanged: true, OutputMode: BatchOutputFailures, TimeoutMS: 5000, MaxBytesPerJob: 4096})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor = result.Cursor
+		for _, job := range result.Jobs {
+			if job.ID == "fail" && job.State == BatchJobFailed {
+				if !job.FailureTail || !strings.Contains(strings.Join(job.Lines, "\n"), "FINAL-FAIL") {
+					t.Fatalf("failure mode missed tail: %+v", job)
+				}
+				if job.BytesReturned > 4096 {
+					t.Fatalf("failure tail exceeded byte budget: %+v", job)
+				}
+				foundTail = true
+			}
+		}
+	}
+	if !foundTail {
+		t.Fatalf("terminal failure tail was never delivered: %+v", result)
+	}
+}
+
+func TestBatchNoneModeReturnsStateOnly(t *testing.T) {
+	m := batchTestManager(t, 2)
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{OutputMode: BatchOutputNone, InitialWaitMS: 1000, Jobs: []BatchJobRequest{
+		{ID: "a", Command: "printf 'secret-a\\n'", PTY: PTYNever}, {ID: "b", Command: "printf 'secret-b\\n'; exit 3", PTY: PTYNever},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.State != BatchCompleted {
+		start = waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
+	}
+	state, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: false, OutputMode: BatchOutputNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range state.Jobs {
+		if len(job.Lines) != 0 || len(job.Streams) != 0 || job.LatestLine != nil {
+			t.Fatalf("none mode leaked output: %+v", job)
+		}
+	}
+	if state.Counts.Failed != 1 || state.Counts.Completed != 1 {
+		t.Fatalf("none mode lost terminal state: %+v", state.Counts)
+	}
+}
+
+func TestBatchRejectsInvalidOutputMode(t *testing.T) {
+	m := batchTestManager(t, 2)
+	if _, err := m.StartBatch(context.Background(), BatchStartRequest{OutputMode: "verbose", Jobs: []BatchJobRequest{{ID: "a", Command: "true"}, {ID: "b", Command: "true"}}}); err == nil {
+		t.Fatal("invalid start output mode accepted")
+	}
+	start, err := m.StartBatch(context.Background(), BatchStartRequest{Jobs: []BatchJobRequest{{ID: "a", Command: "true"}, {ID: "b", Command: "true"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OutputMode: "verbose"}); err == nil {
+		t.Fatal("invalid read output mode accepted")
+	}
+}

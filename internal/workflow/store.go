@@ -78,6 +78,9 @@ func (s *Store) Create(req CreateRequest) (Run, error) {
 		UpdatedAt:        now,
 		LastCheckpointAt: now,
 	}
+	if err := ValidateRun(run); err != nil {
+		return Run{}, err
+	}
 	lock, releaseLock := s.runLocks.Acquire(id)
 	lock.Lock()
 	err = s.writeRunLocked(run)

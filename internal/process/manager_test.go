@@ -562,3 +562,66 @@ func TestUnknownPTYStablePromptStillDetectedAfterExtendedWindow(t *testing.T) {
 		}
 	}
 }
+
+func TestResponseByteBudgetPreservesOversizedLineForLargerRetry(t *testing.T) {
+	m, err := NewManager(Options{
+		DefaultShell: "/bin/bash", DefaultWaitMS: 1000, InitialOutputLines: 200,
+		ResponseOutputBytes: 64 << 10, FailureTailLines: 100,
+		OutputBufferBytes: 4 << 20, MaxLineBytes: 2 << 20, CompletedSessions: 10, BatchMaxParallel: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	result, err := m.Start(context.Background(), StartRequest{Command: `python3 -c "print('x'*100000)"`, TimeoutMS: 1000, PTY: PTYNever})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OutputTruncated || result.ReadCount != 0 || result.Remaining != 1 || result.OmittedBytes == 0 {
+		t.Fatalf("oversized initial response metadata=%+v", result)
+	}
+	if result.BytesReturned > 64<<10 || len(result.Output) != 1 || len(result.Output[0]) >= 100000 {
+		t.Fatalf("initial response exceeded budget or was not previewed: bytes=%d output_len=%d", result.BytesReturned, len(result.Output[0]))
+	}
+	full, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, MaxBytes: 200000, TimeoutMS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.OutputTruncated || full.ReadCount != 1 || full.Remaining != 0 || len(full.Lines) != 1 || len(full.Lines[0]) != 100000 {
+		t.Fatalf("larger retry did not recover authoritative retained line: %+v line_len=%d", full, len(full.Lines[0]))
+	}
+}
+
+func TestResponseByteBudgetPaginatesWithoutSkippingWholeLines(t *testing.T) {
+	m, err := NewManager(Options{
+		DefaultShell: "/bin/bash", DefaultWaitMS: 1000, InitialOutputLines: 200,
+		ResponseOutputBytes: 1500, FailureTailLines: 100,
+		OutputBufferBytes: 4 << 20, MaxLineBytes: 2 << 20, CompletedSessions: 10, BatchMaxParallel: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	cmd := `python3 -c "print('a'*1000); print('b'*1000); print('c'*1000)"`
+	start, err := m.Start(context.Background(), StartRequest{Command: cmd, TimeoutMS: 1000, PTY: PTYNever})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.ReadCount != 1 || start.Remaining != 2 || !start.OutputTruncated || len(start.Output) != 1 || start.Output[0][0] != 'a' {
+		t.Fatalf("unexpected first byte page: %+v", start)
+	}
+	second, err := m.ReadOutput(context.Background(), OutputRequest{PID: start.PID, Offset: 0, Length: 10, MaxBytes: 1500, TimeoutMS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ReadCount != 1 || second.Remaining != 1 || second.Lines[0][0] != 'b' {
+		t.Fatalf("second byte page skipped/duplicated a line: %+v", second)
+	}
+	third, err := m.ReadOutput(context.Background(), OutputRequest{PID: start.PID, Offset: 0, Length: 10, MaxBytes: 1500, TimeoutMS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.ReadCount != 1 || third.Remaining != 0 || third.Lines[0][0] != 'c' {
+		t.Fatalf("third byte page skipped/duplicated a line: %+v", third)
+	}
+}
