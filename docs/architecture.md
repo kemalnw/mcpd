@@ -11,7 +11,7 @@ The project deliberately separates three kinds of state:
 1. **MCP transport state:** none. HTTP uses stateless MCP `2026-07-28`.
 2. **Runtime resource state:** explicit process/search handles such as PIDs and
    search IDs.
-3. **Durable daemon state:** configuration, OAuth identity, and audit history.
+3. **Durable daemon state:** configuration, OAuth identity, audit history, and versioned engineering run/checkpoint metadata with disk-backed job logs.
 
 This keeps protocol requests independent while still supporting REPLs,
 long-running commands, and progressive search.
@@ -48,6 +48,9 @@ internal/service
 
 internal/audit
   normalized tool-call events + persistent JSONL
+
+internal/workflow
+  versioned durable engineering runs, revisioned checkpoints, and disk-backed job logs
 
 internal/config
   defaults, TOML loading, validation
