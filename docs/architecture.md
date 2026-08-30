@@ -1,307 +1,118 @@
 # Architecture
 
-## Scope
+MCPD is a self-hosted MCP server for Linux machines. It keeps the protocol layer
+small and delegates operating-system behavior to focused internal packages.
 
-`mcpd` is a self-hosted MCP daemon for Linux VMs. The daemon exposes direct OS
-capabilities to remote AI clients and executes those capabilities using the
-permissions of the user running the daemon.
+## Request path
 
-The project deliberately separates three kinds of state:
+A normal remote deployment looks like:
 
-1. **MCP transport state:** none. HTTP uses stateless MCP `2026-07-28`.
-2. **Runtime resource state:** explicit process/search handles such as PIDs and
-   search IDs.
-3. **Durable daemon state:** configuration, OAuth identity, audit history, and versioned engineering run/checkpoint metadata with disk-backed job logs.
+```text
+MCP client
+    |
+    | HTTPS + OAuth
+    v
+HTTPS frontend (Caddy, reverse proxy, or tunnel)
+    |
+    | HTTP
+    v
+mcpd
+    |
+    +-- process / PTY
+    +-- filesystem
+    +-- search
+    +-- durable execution supervisor
+    +-- workflow state
+    +-- audit log
+```
 
-This keeps protocol requests independent while still supporting REPLs,
-long-running commands, and progressive search.
+MCPD itself is an HTTP origin server. TLS is intentionally terminated outside the
+daemon so certificate lifecycle and public ingress remain standard infrastructure
+concerns.
+
+## State model
+
+MCP transport requests are stateless. Long-lived work is represented by explicit
+application handles instead of transport sessions:
+
+- PIDs and batch IDs for normal process execution;
+- search IDs for progressive searches;
+- durable job IDs for restart-surviving commands;
+- run IDs for persistent workflow/checkpoint state.
+
+This separation lets clients reconnect without pretending an HTTP/MCP connection is
+the lifetime of the underlying Linux resource.
 
 ## Package boundaries
 
 ```text
-cmd/mcpd
-  CLI entry point only
-
-internal/app
-  dependency wiring, HTTP lifecycle, MCP transport
-
-internal/tools
-  MCP contracts and adapters; no OS-specific process logic
-
-internal/process
-  process lifecycle, PTY, signals, output buffering/pagination
-
-internal/filesystem
-  native filesystem facade, text/URL reads, metadata, editing
-
-internal/documents      (planned)
-  image, Excel, DOCX, PDF handlers plugged into the file facade
-
-internal/search
-  progressive file/content sessions, ripgrep backend, native fallback
-
-internal/oauth
-  OAuth authorization/resource server, CIMD, PKCE, JWTs, MCP auth challenges
-
-internal/service
-  systemd unit rendering, installation, lifecycle commands and doctor checks
-
-internal/audit
-  normalized tool-call events + persistent JSONL
-
-internal/workflow
-  versioned durable engineering runs, revisioned checkpoints, and disk-backed job logs
-
-internal/config
-  defaults, TOML loading, validation
+cmd/mcpd           CLI entry point
+internal/app       dependency wiring, HTTP/MCP lifecycle
+internal/tools     MCP schemas and adapters
+internal/process   process groups, PTY, output retention, batches
+internal/filesystem native filesystem and text/URL operations
+internal/search    progressive search sessions and backends
+internal/durableexec restart-surviving command supervisor/state
+internal/workflow  durable runs, checkpoints, handoffs, retention
+internal/oauth     OAuth authorization/resource server
+internal/service   systemd installation and lifecycle operations
+internal/audit     structured durable tool-call audit events
+internal/config    defaults, TOML loading, validation
 ```
 
-The tool layer depends on domain interfaces. Domain packages must not depend on
-MCP request/response types. This prevents protocol concerns from leaking into
-OS logic and keeps core behavior independently testable.
+Protocol-specific types stay near `internal/tools` and `internal/app`. Domain
+packages own operating-system and persistence behavior so core logic remains
+testable without an MCP transport.
+
+## Execution model
+
+Normal process tools are optimized for live interaction. `start_process` manages a
+process group, optional PTY, bounded output retention, and a handle that can be
+continued with later calls. Batch execution adds bounded concurrency for multiple
+independent non-interactive jobs.
+
+Durable jobs use a separate supervisor service. That service owns the durable
+runner lifecycle so restarting `mcpd.service` does not terminate an already-running
+durable command. State and logs are persisted on disk and reconciled when the main
+daemon reconnects.
+
+Workflow state is separate again: it stores objectives, revisions, checkpoints,
+handoffs, and references to execution evidence. It is deliberately not a copy of
+chat history or full command logs.
 
 ## Authorization model
 
-OAuth is embedded in the same process but kept outside the tool/domain packages.
-The OAuth issuer is the canonical HTTPS origin, while the protected resource is
-the specific MCP endpoint. For example:
+For remote use, MCPD combines an OAuth authorization server with the MCP protected
+resource. Authorization Code + PKCE is used for interactive authorization, and
+refresh tokens are available when the client requests offline access.
+
+Read-only tools require `mcp:read`; filesystem mutation and process-control tools
+require `mcp:write`.
+
+The public OAuth issuer is the canonical HTTPS origin while the MCP resource is the
+MCP endpoint beneath it, for example:
 
 ```text
-issuer   = https://mcp.example.com
-resource = https://mcp.example.com/mcp
+issuer   https://mcp.example.com
+resource https://mcp.example.com/mcp
 ```
 
-The authorization server supports Authorization Code + PKCE S256 and Client ID
-Metadata Documents. Client metadata is fetched only from public HTTPS addresses;
-redirects are disabled and resolved private/loopback/link-local addresses are
-rejected to avoid turning CIMD lookup into an SSRF primitive.
+The backend can remain bound to loopback because the HTTPS frontend owns public
+network exposure.
 
-Owner authentication is intentionally local: `mcpd auth set-password` stores an
-Argon2id password verifier in the daemon state directory. Authorization codes are
-one-time, short-lived in-memory values. Access tokens are Ed25519-signed JWTs and
-are checked for signature, issuer, exact MCP audience, expiry, client, and scope on
-every protected request.
+## Unix permission model
 
-Long-lived authorization uses OAuth refresh tokens only when the client explicitly
-requests `offline_access`. Access tokens remain short-lived; refresh tokens are
-opaque, rotate on every successful refresh, and use a sliding inactivity timeout
-(default 30 days). Refresh-token families are bound to the original client, MCP
-resource, and granted scopes. Reuse of a rotated token revokes its family. Only
-SHA-256 token digests and authorization metadata are persisted in
-`refresh-tokens.json`; raw refresh bearer tokens are never written to server state.
+MCPD deliberately does not invent a second filesystem/process sandbox. Tool access
+is bounded by the Unix account running the daemon. A dedicated unprivileged service
+user therefore limits what connected clients can access; running the daemon as
+`root` intentionally removes that boundary.
 
-The current official Go MCP SDK does not yet serialize the `securitySchemes` field
-on `Tool`. A narrow HTTP compatibility adapter adds that top-level wire field only
-to `tools/list`; tool authorization itself happens in parsed MCP middleware and
-does not trust client-supplied routing headers.
+## Observability
 
-Read operations use `mcp:read`; operations that can mutate filesystem/process
-state use `mcp:write`. Missing or insufficient authorization on `tools/call` is
-returned as an MCP tool error containing `_meta["mcp/www_authenticate"]`, allowing
-OAuth-capable clients to start account linking.
+Operational events are written to journald and durable tool-call audit events can
+be written to JSONL. Tool calls and results use correlation identifiers so operators
+can trace an action without storing entire file bodies or bearer credentials in the
+normal service log.
 
-## HTTP origin and HTTPS boundary
-
-`mcpd` serves plain HTTP only. The canonical public OAuth/MCP origin is configured
-with `auth.external_url` and remains HTTPS, but TLS termination is owned by the
-deployment layer rather than the daemon. The default local listener is
-`127.0.0.1:31354`.
-
-A typical remote topology is:
-
-```text
-MCP client -> HTTPS :443 -> user-managed reverse proxy/TLS -> HTTP 127.0.0.1:31354 -> mcpd
-```
-
-DNS is independent from the backend port. With Cloudflare DNS-only records,
-clients resolve the domain directly to the origin VM; that VM must provide the
-HTTPS frontend on port 443. Port 80, certificate issuance, renewal, and TLS policy
-are outside `mcpd`.
-
-## systemd lifecycle model
-
-`mcpd install` installs the current executable, a system config, durable state,
-and one `mcpd.service` unit. The default daemon identity is the invoking non-root
-`SUDO_USER` when present; `--user root` remains an explicit full-OS choice.
-
-The system config defaults to `127.0.0.1:31354` and stores audit/OAuth state under
-`/var/lib/mcpd`. `StateDirectory=mcpd` reinforces ownership and mode on startup.
-No companion socket unit or privileged-port handoff is required.
-
-`mcpd setup` is the human-facing orchestration layer above these primitives. It
-builds and validates a system config, preserves existing state by default, invokes
-the deterministic installer, configures OAuth when needed, restarts the service,
-runs doctor checks, and verifies the local HTTP health endpoint.
-
-When upgrading from v0.1.x, the installer disables and removes the legacy
-`mcpd.socket` unit. Lifecycle commands are thin systemd/journald wrappers, and
-`doctor` checks installation layout, unit syntax, service identity, state
-permissions, OAuth password state, and service activity.
-
-## Release supply-chain model
-
-Release tags are built by `.github/workflows/release.yml` only when the tagged
-commit is reachable from `main`. Linux amd64 and arm64 binaries are cross-built
-with `CGO_ENABLED=0`, fixed linker metadata, `-trimpath`, and deterministic tar/gzip
-metadata. `checksums.txt` binds the downloadable archives and installer to SHA-256.
-
-Every release artifact and the checksum manifest receives a keyless Sigstore/Cosign
-bundle using the GitHub Actions OIDC identity of the exact release workflow/tag.
-GitHub `actions/attest` additionally publishes signed build provenance for subjects
-listed in the checksum manifest. The workflow verifies its own Cosign bundles before
-creating the GitHub Release, so signing failures cannot silently publish unsigned
-assets.
-
-The user-facing installer downloads only over HTTPS by default, verifies the selected
-archive against `checksums.txt`, rejects unexpected archive paths, and uses `sudo`
-only for the final installation write when needed. Signature verification is automatic
-when Cosign is available and can be made mandatory with `MCPD_REQUIRE_SIGNATURE=1`.
-
-## Process model
-
-`start_process` creates an OS process immediately and registers a managed
-session keyed by its real PID. `timeout_ms` is a response wait timeout, not a
-process lifetime timeout.
-
-```text
-start_process
-     |
-     +--> spawn shell process
-     +--> register PID/session
-     +--> capture stdout/stderr or PTY stream
-     +--> wait until:
-           - process exits, or
-           - prompt is detected, or
-           - timeout_ms elapses
-     |
-     +--> return PID + current structured state
-```
-
-Long-running processes remain alive after the tool call returns. Subsequent MCP
-requests operate on the PID explicitly.
-
-### PTY
-
-Desktop Commander compatibility does not require copying its pipe-based
-terminal implementation. `mcpd` uses a real pseudo-terminal for interactive
-workloads.
-
-`start_process` adds an optional `pty` extension:
-
-- `auto` — default; detect common interactive commands.
-- `always` — force PTY.
-- `never` — use stdin/stdout/stderr pipes.
-
-Requests that omit `pty` remain compatible with the Desktop Commander input
-shape.
-
-### Output retention
-
-Each process has a bounded in-memory output buffer. Current defaults:
-
-- 50 MiB per process.
-- 1 MiB maximum individual line.
-- 100 completed process sessions retained.
-
-Oldest lines are evicted when the buffer exceeds its limit. Absolute line
-numbers remain monotonic through eviction.
-
-`read_process_output` preserves three offset modes:
-
-- `offset = 0`: read from the process cursor and advance it.
-- `offset > 0`: absolute read without changing the cursor.
-- `offset < 0`: tail-relative read without changing the cursor.
-
-## Filesystem model
-
-The MCP tool layer delegates to `internal/filesystem`; it does not call `os.*`
-directly. The current engine implements native text and filesystem operations,
-while preserving a stable facade for later structured formats.
-
-Text reads are streaming and bounded by requested line ranges rather than file
-size. Negative offsets use a tail ring buffer. Directory recursion returns all
-top-level entries and caps nested directories to prevent one dependency tree
-from consuming the entire model context.
-
-`edit_block` intentionally separates exact modification from fuzzy discovery:
-exact replacement occurs only when the observed match count equals
-`expected_replacements`. A fuzzy closest match is diagnostic only. On Linux,
-edit writes preserve symlink targets; multiply hard-linked files are rewritten
-in place to preserve inode sharing.
-
-Format dispatch currently recognizes image, Excel, PDF, and DOCX extensions and
-returns an explicit unsupported-format error until their dedicated handlers are
-implemented. This prevents binary containers from being accidentally treated
-as text while keeping the external `read_file`/`write_file`/`edit_block`
-contracts stable.
-
-## Search model
-
-Search uses explicit application-level `sessionId` handles while the MCP
-transport remains stateless. `start_search` creates a background worker and
-waits only briefly for an initial chunk before returning. Later requests read
-retained results by absolute offset or negative tail offset.
-
-```text
-start_search
-     |
-     +--> search_<id>
-            |
-            +--> ripgrep backend (preferred when `rg` is available)
-            |
-            +--> native Go fallback (zero external requirement)
-            |
-            +--> bounded global match count
-            +--> cancellation / timeout
-            +--> retained completed results
-```
-
-The native fallback intentionally exists so `mcpd` does not require ripgrep to
-start. Ripgrep remains preferred because it honors ignore files and is much
-faster on large trees. Both backends share the same result/session contract.
-
-`maxResults` is enforced as a global match cap rather than passing ripgrep's
-`-m` through directly, because ripgrep defines `-m` per file. Likewise,
-`filePattern` is intersected with the primary filename pattern; multiple
-positive ripgrep globs would otherwise form a union. These choices make tool
-semantics stable regardless of backend.
-
-Completed sessions are retained for five minutes after their last read by
-default. Stopping a search cancels work but does not delete already discovered
-results.
-
-## Structured tool outputs
-
-Every `mcpd` tool uses the typed MCP Go SDK API. Go input/output types generate
-JSON Schema 2020-12 contracts and tool results expose structured content.
-
-Human-readable text remains available through the SDK fallback, but agents are
-not required to parse prose to recover PIDs, states, line counts, or exit codes.
-
-## Audit model
-
-Every tool invocation passes through a generic audit wrapper. The normalized
-event contains:
-
-```json
-{
-  "id": "evt_...",
-  "timestamp": "...",
-  "tool": "start_process",
-  "arguments": {},
-  "duration_ms": 12,
-  "status": "success",
-  "error": ""
-}
-```
-
-The store maintains a small in-memory recent ring for MCP diagnostics and an
-append-only JSONL stream for durable CLI log access.
-
-## Protocol baseline
-
-The first implementation pins the official
-`github.com/modelcontextprotocol/go-sdk` release that introduced complete MCP
-`2026-07-28` support. Streamable HTTP is configured with `Stateless: true`.
-
-Legacy MCP sessions are not part of the target architecture.
+See [operations.md](operations.md) for runtime state and logging details and
+[tools.md](tools.md) for tool-selection and retry-safety guidance.

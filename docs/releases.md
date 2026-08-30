@@ -1,75 +1,47 @@
-# Releases and verification
+# Releases
 
-Official releases are published from Git tags matching `v<semver>` by
-`.github/workflows/release.yml`. The release workflow only accepts tags whose
-commit is already reachable from `main`.
+Official releases are created from tags matching `v<semver>` by
+`.github/workflows/release.yml`. Release tags must point to commits already
+reachable from `main`.
 
-Each release currently contains:
+## Artifacts
 
-- `mcpd_<version>_linux_amd64.tar.gz`
-- `mcpd_<version>_linux_arm64.tar.gz`
-- `install.sh`
-- `checksums.txt`
-- one `.sigstore.json` bundle for every tarball, `install.sh`, and `checksums.txt`
-- a GitHub build-provenance attestation for the files listed in `checksums.txt`
+A release includes Linux `amd64` and `arm64` archives, `install.sh`,
+`checksums.txt`, Sigstore bundles, and GitHub build provenance.
 
-Build metadata (`version`, commit SHA, and commit timestamp) is injected through
-Go linker flags. Archives use a fixed source timestamp, numeric owner/group 0,
-sorted entries, and `gzip -n` so the same source inputs produce identical
-release archives.
+The release workflow builds deterministic archives, signs release assets through
+GitHub OIDC/Sigstore, verifies the generated signatures, and publishes the GitHub
+Release only after the release checks pass.
 
-## Install
+## Install and verify
 
-The stable one-line binary installer is the `install.sh` asset from the latest
-GitHub Release:
+The normal installer is:
 
 ```bash
 curl -fsSL https://github.com/kemalnw/mcpd/releases/latest/download/install.sh | sh
 ```
 
-It detects Linux `amd64`/`arm64`, downloads the matching release tarball and
-`checksums.txt`, verifies SHA-256, rejects unexpected archive paths, and installs
-the binary to `/usr/local/bin` (using `sudo` only for the final filesystem write
-when required).
+The installer verifies SHA-256 before installing. If `cosign` is available it also
+verifies the Sigstore identity of `checksums.txt`.
 
-The script does not silently configure a system service. After installing the
-binary, run:
+Require signature verification explicitly with:
 
 ```bash
-sudo mcpd install
+curl -fsSL https://github.com/kemalnw/mcpd/releases/latest/download/install.sh \
+  | MCPD_REQUIRE_SIGNATURE=1 sh
 ```
 
-To install the systemd service in the same flow, use:
+Set `MCPD_SETUP=0` when only the binary should be installed. Otherwise an
+interactive terminal starts `mcpd setup`; non-interactive installs print the setup
+command and exit without waiting for input.
 
-```bash
-curl -fsSL https://github.com/kemalnw/mcpd/releases/latest/download/install.sh | MCPD_INSTALL_SERVICE=1 sh
-```
+For manual verification, use the release's `.sigstore.json` bundle with the exact
+release-workflow identity for the tag. GitHub provenance can additionally be
+verified with `gh attestation verify`.
 
-## Verify with Sigstore
+## Maintainer flow
 
-If `cosign` is already installed, `install.sh` automatically verifies the
-signature on `checksums.txt`. To require that stronger verification instead of
-allowing checksum-only installation, set:
-
-```bash
-curl -fsSL https://github.com/kemalnw/mcpd/releases/latest/download/install.sh | MCPD_REQUIRE_SIGNATURE=1 sh
-```
-
-For manual verification, download an artifact and its bundle, then use the exact
-workflow identity for the release tag:
-
-```bash
-cosign verify-blob checksums.txt \
-  --bundle checksums.txt.sigstore.json \
-  --certificate-identity "https://github.com/kemalnw/mcpd/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
-```
-
-GitHub provenance can additionally be verified with `gh attestation verify`.
-
-## Maintainer release flow
-
-Releases are tag-driven. After the intended commit is merged to `main`:
+After the intended commit is on `main` and CI is green:
 
 ```bash
 git checkout main
@@ -78,31 +50,35 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The workflow validates the tag, reruns source checks, builds both architectures,
-signs every release asset keylessly through GitHub OIDC/Sigstore, creates build
-provenance, verifies the generated signatures, and only then creates the GitHub
-Release.
+Do not replace assets on an existing release. Publish a new version so the tag,
+checksums, signatures, provenance, and release notes continue to describe one
+immutable build.
 
-After deploying an MCPD upgrade, verify the public endpoint with `scripts/verify-live-schema.sh`. `/healthz` publishes both the binary version and a tool-catalog version/fingerprint. The verifier can compare them using `MCPD_EXPECT_VERSION`, `MCPD_EXPECT_CATALOG_VERSION`, and `MCPD_EXPECT_CATALOG_FINGERPRINT`. If the live server reports the expected catalog but a connected client still lacks a tool or input field, the remaining problem is client-side schema caching; reconnect/reload that MCP client rather than repeatedly restarting the daemon. Tags containing a prerelease suffix such as `v1.0.0-rc.1` produce a
-GitHub prerelease.
+Prerelease tags such as `v1.0.0-rc.1` are published as GitHub prereleases.
 
-Do not manually replace assets on an existing version. Publish a new version so
-checksums, signatures, provenance, tag, and release notes continue to describe a
-single immutable build.
+## Verify a deployed upgrade
 
-## Verify schema-changing upgrades
-
-A restarted service and a correct binary version do **not** prove that an already-connected MCP client has consumed a new tool schema. After deploying a release that changes tool inputs/outputs, verify both layers separately:
+After deployment, verify the running binary and the live MCP tool catalog rather
+than assuming a successful service restart means clients have refreshed their
+schemas:
 
 ```bash
 /usr/local/bin/mcpd version
 ./scripts/verify-live-schema.sh https://mcp.example.com start_search pathHint
 ```
 
-`verify-live-schema.sh` performs a fresh HTTP `GET /healthz` and a fresh MCP `tools/list`, then checks that the expected tool input field is present. Set `MCPD_EXPECT_VERSION=vX.Y.Z` when the live binary version must also match exactly, and `MCPD_MCP_PATH=/custom-path` for a non-default MCP endpoint.
+`verify-live-schema.sh` performs fresh health and `tools/list` requests. Set
+`MCPD_EXPECT_VERSION`, `MCPD_EXPECT_CATALOG_VERSION`, or
+`MCPD_EXPECT_CATALOG_FINGERPRINT` when the deployment must match an exact release
+or catalog.
 
-If the fresh live check passes but ChatGPT or another already-connected client still exposes the old schema, reconnect/reload that MCP connection so the client performs a new `tools/list`. Do not restart the daemon repeatedly: the remaining problem is client-side metadata caching, not the running server. This distinction should be part of every schema-changing release verification.
+If the fresh live check is correct but an already-connected client still exposes
+an older schema, reconnect that MCP client. Repeated daemon restarts do not fix
+client-side schema caching.
 
-### Conflict-marker gate
+Before tagging, run the repository gates used by CI:
 
-`make check` and `make release-test` scan model/source/config/docs/scripts/skills text for unresolved Git conflict markers. A rebase is not considered resolved merely because Git accepts `git add`; the repository gate must also pass before a PR/release.
+```bash
+make check
+make release-test
+```

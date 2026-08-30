@@ -45,10 +45,6 @@ When an existing config is detected, the default choice is to keep it and repair
 or reinstall the service. Reconfiguration requires an explicit choice. Existing
 compatible OAuth state is preserved; setup does not silently replace secrets.
 
-A v0.1.x config containing `[tls]` cannot be kept unchanged because TLS support
-was removed in v0.2. Choose reconfigure and retain the same public domain and
-OAuth state directory as appropriate.
-
 ## Non-interactive automation
 
 Without a TTY, `mcpd setup` never prompts. Managed Caddy is the default:

@@ -40,6 +40,11 @@ initial_wait_ms = 40
 # Advisory age after which resume/status marks a checkpoint due. Agents should
 # also checkpoint before long waits and before an anticipated session/turn limit.
 checkpoint_interval_seconds = 900
+# Terminal workflow runs older than this may be collected automatically.
+completed_retention_seconds = 2592000
+# Background workflow garbage-collection cadence and per-pass delete bound.
+garbage_collect_interval_seconds = 3600
+garbage_collect_max_deletes = 100
 
 [audit]
 enabled = true
