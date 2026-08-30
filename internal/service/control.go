@@ -14,6 +14,9 @@ func Start(stdout, stderr io.Writer) error {
 	if err := requireRoot("start"); err != nil {
 		return err
 	}
+	if err := runCommand(stdout, stderr, "systemctl", "start", DurableServiceName); err != nil {
+		return err
+	}
 	return runCommand(stdout, stderr, "systemctl", "start", ServiceName)
 }
 
@@ -27,11 +30,14 @@ func Restart(stdout, stderr io.Writer) error {
 	if err := requireRoot("restart"); err != nil {
 		return err
 	}
+	if err := runCommand(stdout, stderr, "systemctl", "start", DurableServiceName); err != nil {
+		return err
+	}
 	return runCommand(stdout, stderr, "systemctl", "restart", ServiceName)
 }
 
 func Status(stdout, stderr io.Writer) error {
-	return runCommand(stdout, stderr, "systemctl", "status", "--no-pager", ServiceName)
+	return runCommand(stdout, stderr, "systemctl", "status", "--no-pager", ServiceName, DurableServiceName)
 }
 
 type LogOptions struct {
@@ -44,7 +50,7 @@ func Logs(stdout, stderr io.Writer, opts LogOptions) error {
 	if opts.Lines <= 0 {
 		opts.Lines = 100
 	}
-	args := []string{"-u", ServiceName, "-n", strconv.Itoa(opts.Lines)}
+	args := []string{"-u", ServiceName, "-u", DurableServiceName, "-n", strconv.Itoa(opts.Lines)}
 	if opts.Since != "" {
 		args = append(args, "--since", opts.Since)
 	}

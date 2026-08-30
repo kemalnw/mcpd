@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/kemalnw/mcpd/internal/app"
 	"github.com/kemalnw/mcpd/internal/config"
+	"github.com/kemalnw/mcpd/internal/durableexec"
 	oauthsrv "github.com/kemalnw/mcpd/internal/oauth"
 	"github.com/kemalnw/mcpd/internal/service"
 	"github.com/kemalnw/mcpd/internal/version"
@@ -53,6 +55,10 @@ func run(args []string) error {
 		return doctorCommand(args[1:])
 	case "auth":
 		return authCommand(args[1:])
+	case "__durable_runner":
+		return durableRunnerCommand(args[1:])
+	case "__durable_supervisor":
+		return durableSupervisorCommand(args[1:])
 	case "version", "--version", "-v":
 		data, _ := json.MarshalIndent(version.Current(), "", "  ")
 		fmt.Println(string(data))
@@ -63,6 +69,39 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func durableRunnerCommand(args []string) error {
+	fs := flag.NewFlagSet("__durable_runner", flag.ContinueOnError)
+	statePath := fs.String("state", "", "durable runner state path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *statePath == "" {
+		return errors.New("durable runner state path is required")
+	}
+	return durableexec.RunRunner(*statePath, os.Stdin)
+}
+
+func durableSupervisorCommand(args []string) error {
+	fs := flag.NewFlagSet("__durable_supervisor", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to TOML configuration")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := loadCommandConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve durable supervisor executable: %w", err)
+	}
+	root := filepath.Join(filepath.Dir(cfg.Workflow.StateDir), "durable")
+	socket := durableexec.SupervisorSocket(root)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return durableexec.ServeSupervisor(ctx, root, socket, executable)
 }
 
 func authCommand(args []string) error {

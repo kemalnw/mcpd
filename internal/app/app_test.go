@@ -55,7 +55,7 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	if init.ServerInfo.Description == "" || init.ServerInfo.WebsiteURL != "https://github.com/kemalnw/mcpd" {
 		t.Fatalf("server metadata = %#v", init.ServerInfo)
 	}
-	if !strings.Contains(init.Instructions, "narrowest dedicated tool") || !strings.Contains(init.Instructions, "continue that PID") || !strings.Contains(init.Instructions, "pathHint") {
+	if !strings.Contains(init.Instructions, "narrowest dedicated tool") || !strings.Contains(init.Instructions, "continue that PID") || !strings.Contains(init.Instructions, "pathHint") || !strings.Contains(init.Instructions, "start_durable_job") {
 		t.Fatalf("server instructions missing tool-selection guidance: %q", init.Instructions)
 	}
 	listed, err := session.ListTools(context.Background(), nil)
@@ -68,6 +68,7 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 		"read_file": false, "read_multiple_files": false, "write_file": false, "create_directory": false,
 		"list_directory": false, "move_file": false, "get_file_info": false, "edit_block": false,
 		"start_search": false, "get_more_search_results": false, "stop_search": false, "list_searches": false,
+		"start_durable_job": false, "get_durable_job": false, "list_durable_jobs": false, "read_durable_job_log": false, "cancel_durable_job": false,
 	}
 	byName := make(map[string]*mcp.Tool, len(listed.Tools))
 	for _, tool := range listed.Tools {
@@ -96,6 +97,11 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	assertToolHints("create_directory", false, false, true, false)
 	assertToolHints("kill_process", false, true, false, false)
 	assertToolHints("get_more_search_results", true, false, true, false)
+	assertToolHints("start_durable_job", false, true, false, true)
+	assertToolHints("get_durable_job", true, false, true, false)
+	assertToolHints("list_durable_jobs", true, false, true, false)
+	assertToolHints("read_durable_job_log", true, false, true, false)
+	assertToolHints("cancel_durable_job", false, true, true, false)
 	for name, found := range required {
 		if !found {
 			t.Errorf("required tool %q not listed", name)

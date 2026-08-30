@@ -77,6 +77,9 @@ func Install(opts InstallOptions) (InstallResult, error) {
 	if err := writeAtomic(paths.ServiceUnit, []byte(RenderService(account)), 0o644); err != nil {
 		return InstallResult{}, fmt.Errorf("install systemd service: %w", err)
 	}
+	if err := writeAtomic(paths.DurableServiceUnit, []byte(RenderDurableService(account)), 0o644); err != nil {
+		return InstallResult{}, fmt.Errorf("install durable systemd service: %w", err)
+	}
 	needsPassword := false
 	if cfg.Auth.Enabled {
 		_, statErr := os.Stat(rootedPath(paths.Root, filepath.Join(cfg.Auth.StateDir, "owner.password")))
@@ -95,11 +98,17 @@ func Install(opts InstallOptions) (InstallResult, error) {
 		return InstallResult{}, err
 	}
 	if opts.Enable {
-		if err := runCommand(os.Stdout, os.Stderr, "systemctl", "enable", ServiceName); err != nil {
+		if err := runCommand(os.Stdout, os.Stderr, "systemctl", "enable", DurableServiceName, ServiceName); err != nil {
 			return InstallResult{}, err
 		}
 	}
 	if opts.Start && !needsPassword {
+		// Never restart the durable supervisor during an MCPD upgrade: doing so
+		// would intentionally terminate its job cgroup. `start` is a no-op when
+		// already active and starts it on first install.
+		if err := runCommand(os.Stdout, os.Stderr, "systemctl", "start", DurableServiceName); err != nil {
+			return InstallResult{}, err
+		}
 		if err := runCommand(os.Stdout, os.Stderr, "systemctl", "restart", ServiceName); err != nil {
 			return InstallResult{}, err
 		}
@@ -148,6 +157,7 @@ func SystemDefaultConfig() config.Config {
 	cfg.Server.Listen = "127.0.0.1:31354"
 	cfg.Audit.Path = filepath.Join(StatePath, "audit.jsonl")
 	cfg.Auth.StateDir = filepath.Join(StatePath, "auth")
+	cfg.Workflow.StateDir = filepath.Join(StatePath, "runs")
 	return cfg
 }
 

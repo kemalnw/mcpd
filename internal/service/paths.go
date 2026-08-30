@@ -3,19 +3,22 @@ package service
 import "path/filepath"
 
 const (
-	BinaryPath  = "/usr/local/bin/mcpd"
-	ConfigPath  = "/etc/mcpd/config.toml"
-	StatePath   = "/var/lib/mcpd"
-	ServiceUnit = "/etc/systemd/system/mcpd.service"
-	ServiceName = "mcpd.service"
+	BinaryPath         = "/usr/local/bin/mcpd"
+	ConfigPath         = "/etc/mcpd/config.toml"
+	StatePath          = "/var/lib/mcpd"
+	ServiceUnit        = "/etc/systemd/system/mcpd.service"
+	ServiceName        = "mcpd.service"
+	DurableServiceUnit = "/etc/systemd/system/mcpd-durable.service"
+	DurableServiceName = "mcpd-durable.service"
 )
 
 type Paths struct {
-	Root        string
-	Binary      string
-	Config      string
-	State       string
-	ServiceUnit string
+	Root               string
+	Binary             string
+	Config             string
+	State              string
+	ServiceUnit        string
+	DurableServiceUnit string
 }
 
 func PathsForRoot(root string) Paths {
@@ -30,6 +33,6 @@ func PathsForRoot(root string) Paths {
 	}
 	return Paths{
 		Root: root, Binary: join(BinaryPath), Config: join(ConfigPath), State: join(StatePath),
-		ServiceUnit: join(ServiceUnit),
+		ServiceUnit: join(ServiceUnit), DurableServiceUnit: join(DurableServiceUnit),
 	}
 }

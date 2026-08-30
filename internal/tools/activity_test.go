@@ -167,3 +167,19 @@ func decodeLogEntries(t *testing.T, raw string) []map[string]any {
 	}
 	return out
 }
+
+func TestDurableCommandAndIdempotencyKeyAreNotLogged(t *testing.T) {
+	var logs bytes.Buffer
+	withActivityTestLogger(t, &logs)
+	command := "curl -H 'Authorization: Bearer durable-super-secret' https://example.test"
+	key := "durable-idempotency-secret"
+	logToolCall(context.Background(), "evt_durable", "start_durable_job", StartDurableJobInput{Command: command, CWD: "/srv/repo", IdempotencyKey: key})
+	text := logs.String()
+	if strings.Contains(text, command) || strings.Contains(text, "durable-super-secret") || strings.Contains(text, key) {
+		t.Fatalf("durable command/key leaked into runtime log: %s", text)
+	}
+	entries := decodeLogEntries(t, text)
+	if len(entries) != 1 || entries[0]["command_sha256"] != auditDigest(command) || entries[0]["has_idempotency_key"] != true {
+		t.Fatalf("durable safe metadata missing: %#v", entries)
+	}
+}
