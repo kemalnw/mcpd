@@ -21,9 +21,9 @@ func RegisterProcess(server *mcp.Server, manager *processmgr.Manager, auditStore
 	t := &ProcessTools{manager: manager, audit: auditStore}
 	mcp.AddTool(server, tool("start_process", "Run a shell command", "Use this for shell commands, builds, tests, package managers, Git, service inspection, and other terminal work. For repository-scoped work, pass cwd instead of embedding `cd <path> &&`. For non-PTY commands, set separate_streams=true only when stdout/stderr identity matters; default merged output remains more compact. The call returns on exit, prompt, or timeout without killing a running process. Continue the same PID with read_process_output or interact_with_process.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process", t.start))
 	mcp.AddTool(server, tool("start_process_batch", "Run independent commands in parallel", "Use this for two or more independent non-interactive shell/build/test/Git/package-manager commands. MCPD schedules jobs up to max_parallel and returns one batch_id. Prefer this over many separate start_process calls when the jobs do not depend on each other. PTY=always is rejected; interactive work stays on start_process. Continue with read_process_batch and use only_changed=true to avoid repeated output.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "start_process_batch", t.startBatch))
-	mcp.AddTool(server, tool("read_process_batch", "Read changed batch jobs", "Use this only with a batch_id from start_process_batch. By default use only_changed=true: the call waits until any job changes and returns only changed jobs with bounded output deltas. Batch output cursors are independent from per-PID read_process_output cursors.", toolHints{readOnly: true}), audited(auditStore, "read_process_batch", t.readBatch))
+	mcp.AddTool(server, tool("read_process_batch", "Read changed batch jobs", "Use this only with a batch_id from start_process_batch. By default use only_changed=true: the call waits until any job changes and returns only changed jobs with line+byte-bounded deltas. MCP calls default to output_mode=failures so noisy successful jobs do not consume model context; use delta only when live stdout/stderr is actually needed. Batch output cursors are independent from per-PID read_process_output cursors.", toolHints{readOnly: true}), audited(auditStore, "read_process_batch", t.readBatch))
 	mcp.AddTool(server, tool("cancel_process_batch", "Cancel a process batch", "Use this to cancel queued/running jobs in a batch created by start_process_batch. Running MCPD-managed process groups are terminated safely; completed jobs remain completed.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "cancel_process_batch", t.cancelBatch))
-	mcp.AddTool(server, tool("read_process_output", "Read command output", "Use this only for a PID returned by start_process. offset=0 waits for unread output and advances the cursor; it also observes same-line/partial updates through generation + latest_line even when no newline was emitted. Positive offsets are absolute retained ranges and negative offsets read from the tail without moving the cursor. Sessions started with separate_streams return stream-tagged records instead of duplicate merged lines.", toolHints{readOnly: true}), audited(auditStore, "read_process_output", t.readOutput))
+	mcp.AddTool(server, tool("read_process_output", "Read command output", "Use this only for a PID returned by start_process. offset=0 waits for unread output and advances the cursor; it also observes same-line/partial updates through generation + latest_line even when no newline was emitted. Positive offsets are absolute retained ranges and negative offsets read from the tail without moving the cursor. Responses are byte-bounded by default; raise max_bytes explicitly when deeper evidence is needed. Sessions started with separate_streams return stream-tagged records instead of duplicate merged lines.", toolHints{readOnly: true}), audited(auditStore, "read_process_output", t.readOutput))
 	mcp.AddTool(server, tool("interact_with_process", "Send input to a command", "Use this only for an interactive PID returned by start_process. By default MCPD appends a newline when absent; set raw_input=true for exact bytes/control-oriented input where no newline should be added. wait_for_prompt controls whether the call waits for another prompt or process completion.", toolHints{destructive: true, openWorld: true}), audited(auditStore, "interact_with_process", t.interact))
 	mcp.AddTool(server, tool("resize_process_pty", "Resize a command PTY", "Use this only for a running PTY session returned by start_process when the terminal dimensions need to change, for example before driving a TUI. rows and cols must be positive terminal cell counts. Non-PTY or exited sessions are rejected.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "resize_process_pty", t.resizePTY))
 	mcp.AddTool(server, tool("force_terminate", "Stop a managed command", "Use this to stop a process session created by start_process. It targets the managed process group, sends SIGINT first, and escalates to SIGKILL if needed. Prefer this over kill_process for MCPD-managed sessions because it handles the process group and cleanup correctly.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "force_terminate", t.forceTerminate))
@@ -58,14 +58,17 @@ type StartProcessBatchInput struct {
 	MaxParallel    int                    `json:"max_parallel,omitempty" jsonschema:"requested concurrency; capped by process.batch_max_parallel"`
 	InitialWaitMS  int                    `json:"initial_wait_ms,omitempty" jsonschema:"milliseconds to wait for the first batch state/output change; defaults to 40"`
 	IdempotencyKey string                 `json:"idempotency_key,omitempty" jsonschema:"optional retry-safety key; equivalent retries return the existing batch instead of executing twice"`
+	OutputMode     string                 `json:"output_mode,omitempty" jsonschema:"failures (default) returns only bounded failure tails, delta streams output changes, none returns state only"`
 }
 
 type ReadProcessBatchInput struct {
-	BatchID     string `json:"batch_id" jsonschema:"batch identifier returned by start_process_batch"`
-	TimeoutMS   int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for a batch change when only_changed is true; defaults to 5000"`
-	Length      int    `json:"length,omitempty" jsonschema:"maximum output lines per returned job; defaults to 100"`
-	OnlyChanged *bool  `json:"only_changed,omitempty" jsonschema:"with a cursor, return only state/output not yet observed by that cursor; without a cursor, wait from call-time baseline; defaults to true"`
-	Cursor      string `json:"cursor,omitempty" jsonschema:"opaque caller-owned cursor returned by start_process_batch/read_process_batch; pass it back so independent clients do not consume each other's progress"`
+	BatchID        string `json:"batch_id" jsonschema:"batch identifier returned by start_process_batch"`
+	TimeoutMS      int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for a batch change when only_changed is true; defaults to 5000"`
+	Length         int    `json:"length,omitempty" jsonschema:"maximum output lines per returned job; defaults to 100"`
+	MaxBytesPerJob int    `json:"max_bytes_per_job,omitempty" jsonschema:"maximum output bytes per returned job; defaults to process.response_output_bytes and is capped at 2097152"`
+	OnlyChanged    *bool  `json:"only_changed,omitempty" jsonschema:"with a cursor, return only state/output not yet observed by that cursor; without a cursor, wait from call-time baseline; defaults to true"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"opaque caller-owned cursor returned by start_process_batch/read_process_batch; pass it back so independent clients do not consume each other's progress"`
+	OutputMode     string `json:"output_mode,omitempty" jsonschema:"failures (default) returns only bounded failure tails, delta streams output changes, none returns state only"`
 }
 
 type BatchIDInput struct {
@@ -77,6 +80,7 @@ type ReadProcessOutputInput struct {
 	TimeoutMS     int  `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for new output when offset is zero; defaults to 5000"`
 	Offset        int  `json:"offset,omitempty" jsonschema:"0 reads from the per-process cursor, positive values are absolute line offsets, negative values address from the end"`
 	Length        int  `json:"length,omitempty" jsonschema:"maximum number of lines to return; defaults to 1000"`
+	MaxBytes      int  `json:"max_bytes,omitempty" jsonschema:"maximum output bytes to return; defaults to process.response_output_bytes and is capped at 2097152"`
 	VerboseTiming bool `json:"verbose_timing,omitempty" jsonschema:"accepted for Desktop Commander compatibility"`
 }
 
@@ -120,19 +124,27 @@ func (t *ProcessTools) start(ctx context.Context, in StartProcessInput) (process
 }
 
 func (t *ProcessTools) startBatch(ctx context.Context, in StartProcessBatchInput) (processmgr.BatchResult, error) {
+	mode := processmgr.BatchOutputMode(in.OutputMode)
+	if mode == "" {
+		mode = processmgr.BatchOutputFailures
+	}
 	jobs := make([]processmgr.BatchJobRequest, 0, len(in.Jobs))
 	for _, job := range in.Jobs {
 		jobs = append(jobs, processmgr.BatchJobRequest{ID: job.ID, Command: job.Command, CWD: job.CWD, Shell: job.Shell, PTY: processmgr.PTYMode(job.PTY), SeparateStreams: job.SeparateStreams, DependsOn: job.DependsOn, ResourceClass: processmgr.ResourceClass(job.ResourceClass)})
 	}
-	return t.manager.StartBatch(ctx, processmgr.BatchStartRequest{Jobs: jobs, MaxParallel: in.MaxParallel, InitialWaitMS: in.InitialWaitMS, IdempotencyKey: in.IdempotencyKey})
+	return t.manager.StartBatch(ctx, processmgr.BatchStartRequest{Jobs: jobs, MaxParallel: in.MaxParallel, InitialWaitMS: in.InitialWaitMS, IdempotencyKey: in.IdempotencyKey, OutputMode: mode})
 }
 
 func (t *ProcessTools) readBatch(ctx context.Context, in ReadProcessBatchInput) (processmgr.BatchResult, error) {
+	mode := processmgr.BatchOutputMode(in.OutputMode)
+	if mode == "" {
+		mode = processmgr.BatchOutputFailures
+	}
 	onlyChanged := true
 	if in.OnlyChanged != nil {
 		onlyChanged = *in.OnlyChanged
 	}
-	return t.manager.ReadBatch(ctx, processmgr.BatchReadRequest{BatchID: in.BatchID, TimeoutMS: in.TimeoutMS, Length: in.Length, OnlyChanged: onlyChanged, Cursor: in.Cursor})
+	return t.manager.ReadBatch(ctx, processmgr.BatchReadRequest{BatchID: in.BatchID, TimeoutMS: in.TimeoutMS, Length: in.Length, MaxBytesPerJob: in.MaxBytesPerJob, OnlyChanged: onlyChanged, Cursor: in.Cursor, OutputMode: mode})
 }
 
 func (t *ProcessTools) cancelBatch(_ context.Context, in BatchIDInput) (processmgr.BatchCancelResult, error) {
@@ -140,7 +152,7 @@ func (t *ProcessTools) cancelBatch(_ context.Context, in BatchIDInput) (processm
 }
 
 func (t *ProcessTools) readOutput(ctx context.Context, in ReadProcessOutputInput) (processmgr.OutputResult, error) {
-	return t.manager.ReadOutput(ctx, processmgr.OutputRequest{PID: in.PID, TimeoutMS: in.TimeoutMS, Offset: in.Offset, Length: in.Length})
+	return t.manager.ReadOutput(ctx, processmgr.OutputRequest{PID: in.PID, TimeoutMS: in.TimeoutMS, Offset: in.Offset, Length: in.Length, MaxBytes: in.MaxBytes})
 }
 
 func (t *ProcessTools) interact(ctx context.Context, in InteractWithProcessInput) (processmgr.InteractResult, error) {

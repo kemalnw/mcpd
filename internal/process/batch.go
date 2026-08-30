@@ -38,6 +38,14 @@ const (
 	BatchJobBlocked     BatchJobState = "blocked"
 )
 
+type BatchOutputMode string
+
+const (
+	BatchOutputDelta    BatchOutputMode = "delta"
+	BatchOutputFailures BatchOutputMode = "failures"
+	BatchOutputNone     BatchOutputMode = "none"
+)
+
 type BatchJobRequest struct {
 	ID              string
 	Command         string
@@ -54,14 +62,17 @@ type BatchStartRequest struct {
 	MaxParallel    int
 	InitialWaitMS  int
 	IdempotencyKey string
+	OutputMode     BatchOutputMode
 }
 
 type BatchReadRequest struct {
-	BatchID     string
-	TimeoutMS   int
-	Length      int
-	OnlyChanged bool
-	Cursor      string
+	BatchID        string
+	TimeoutMS      int
+	Length         int
+	MaxBytesPerJob int
+	OnlyChanged    bool
+	Cursor         string
+	OutputMode     BatchOutputMode
 }
 
 type BatchJobResult struct {
@@ -77,6 +88,11 @@ type BatchJobResult struct {
 	ReadCount       int           `json:"read_count"`
 	TotalLines      int           `json:"total_lines"`
 	Remaining       int           `json:"remaining"`
+	BytesReturned   int           `json:"bytes_returned"`
+	OutputTruncated bool          `json:"output_truncated,omitempty"`
+	OmittedBytes    int           `json:"omitted_bytes,omitempty"`
+	FailureTail     bool          `json:"failure_tail,omitempty"`
+	OmittedBefore   int           `json:"omitted_before,omitempty"`
 	EvictedLines    int64         `json:"evicted_lines"`
 	CursorEvicted   bool          `json:"cursor_evicted,omitempty"`
 	WaitingForInput bool          `json:"waiting_for_input"`
@@ -174,6 +190,10 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 	if waitMS < 0 {
 		return BatchResult{}, errors.New("initial_wait_ms must be >= 0")
 	}
+	outputMode, err := normalizeBatchOutputMode(req.OutputMode)
+	if err != nil {
+		return BatchResult{}, err
+	}
 	seen := make(map[string]struct{}, len(req.Jobs))
 	jobs := make([]*batchJob, 0, len(req.Jobs))
 	for _, jobReq := range req.Jobs {
@@ -232,7 +252,7 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 			}
 			if existing := m.batches[record.BatchID]; existing != nil {
 				m.batchMu.Unlock()
-				return m.readBatchReplaySnapshot(existing, defaultBatchReadLines), nil
+				return m.readBatchReplaySnapshot(existing, defaultBatchReadLines, outputMode), nil
 			}
 			delete(m.batchIdempotency, keyHash)
 		}
@@ -247,7 +267,7 @@ func (m *Manager) StartBatch(ctx context.Context, req BatchStartRequest) (BatchR
 	if waitMS > 0 {
 		m.waitForBatchChange(ctx, b, 0, time.Duration(waitMS)*time.Millisecond)
 	}
-	return m.readBatchSnapshot(b, false, defaultBatchReadLines, batchCursor{Version: 1, BatchID: b.id, Jobs: make(map[string]batchJobCursor)}), nil
+	return m.readBatchSnapshot(b, false, defaultBatchReadLines, m.opts.ResponseOutputBytes, outputMode, batchCursor{Version: 1, BatchID: b.id, Jobs: make(map[string]batchJobCursor)}), nil
 }
 
 func (m *Manager) ReadBatch(ctx context.Context, req BatchReadRequest) (BatchResult, error) {
@@ -263,6 +283,14 @@ func (m *Manager) ReadBatch(ctx context.Context, req BatchReadRequest) (BatchRes
 	}
 	if req.Length <= 0 {
 		req.Length = defaultBatchReadLines
+	}
+	maxBytes, err := effectiveResponseBytes(req.MaxBytesPerJob, m.opts.ResponseOutputBytes)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	outputMode, err := normalizeBatchOutputMode(req.OutputMode)
+	if err != nil {
+		return BatchResult{}, err
 	}
 
 	var cursor batchCursor
@@ -295,7 +323,7 @@ func (m *Manager) ReadBatch(ctx context.Context, req BatchReadRequest) (BatchRes
 			m.waitForBatchChange(ctx, b, baseline, time.Duration(req.TimeoutMS)*time.Millisecond)
 		}
 	}
-	return m.readBatchSnapshot(b, req.OnlyChanged, req.Length, cursor), nil
+	return m.readBatchSnapshot(b, req.OnlyChanged, req.Length, maxBytes, outputMode, cursor), nil
 }
 
 func (m *Manager) CancelBatch(batchID string) (BatchCancelResult, error) {
@@ -538,7 +566,8 @@ func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
 	job.reserved = false
 	job.session = s
 	job.pid = s.pid
-	if b.canceled || job.state == BatchJobCanceled {
+	terminateSpawned := b.canceled || job.state == BatchJobCanceled
+	if terminateSpawned {
 		job.state = BatchJobCanceled
 	} else {
 		job.state = BatchJobRunning
@@ -546,7 +575,10 @@ func (m *Manager) runBatchJob(b *processBatch, job *batchJob) {
 	job.changeGeneration++
 	m.bumpBatchLocked(b)
 	m.batchMu.Unlock()
-	if b.canceled || job.state == BatchJobCanceled {
+	// Lifecycle state is protected by batchMu. Carry the locked decision out as
+	// an immutable local instead of re-reading b/job state while CancelBatch can
+	// mutate it concurrently.
+	if terminateSpawned {
 		_ = m.ForceTerminate(s.pid)
 		return
 	}
@@ -647,7 +679,7 @@ func (m *Manager) batchCursorHasUnreadLocked(b *processBatch, cursor batchCursor
 	return false
 }
 
-func (m *Manager) readBatchSnapshot(b *processBatch, onlyChanged bool, length int, cursor batchCursor) BatchResult {
+func (m *Manager) readBatchSnapshot(b *processBatch, onlyChanged bool, length, maxBytes int, outputMode BatchOutputMode, cursor batchCursor) BatchResult {
 	// Host probing may touch /proc; never do filesystem I/O while holding the
 	// scheduler lock used for batch state transitions.
 	resources := m.resourceProbe()
@@ -675,7 +707,18 @@ func (m *Manager) readBatchSnapshot(b *processBatch, onlyChanged bool, length in
 		}
 		jr := BatchJobResult{ID: job.req.ID, PID: job.pid, State: job.state, Error: job.err}
 		if job.session != nil {
-			state = fillBatchJobDelta(job, state, &jr, length)
+			switch outputMode {
+			case BatchOutputNone:
+				state = advanceBatchJobCursor(job, state, &jr)
+			case BatchOutputFailures:
+				if hasFailureText(job.state) {
+					state = m.fillBatchJobFailureTail(job, state, &jr, maxBytes)
+				} else {
+					state = advanceBatchJobCursor(job, state, &jr)
+				}
+			default:
+				state = m.fillBatchJobDelta(job, state, &jr, length, maxBytes)
+			}
 		}
 		state.ChangeGeneration = job.changeGeneration
 		nextJobs[job.req.ID] = state
@@ -689,15 +732,83 @@ func (m *Manager) readBatchSnapshot(b *processBatch, onlyChanged bool, length in
 	return result
 }
 
-func fillBatchJobDelta(job *batchJob, cursor batchJobCursor, out *BatchJobResult, length int) batchJobCursor {
+func normalizeBatchOutputMode(mode BatchOutputMode) (BatchOutputMode, error) {
+	if mode == "" {
+		return BatchOutputDelta, nil
+	}
+	switch mode {
+	case BatchOutputDelta, BatchOutputFailures, BatchOutputNone:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid batch output mode %q; use delta, failures, or none", mode)
+	}
+}
+
+func advanceBatchJobCursor(job *batchJob, cursor batchJobCursor, out *BatchJobResult) batchJobCursor {
+	s := job.session
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := s.totalLinesLocked()
+	cursor.OutputAbs = total
+	cursor.OutputGeneration = s.outputGeneration
+	out.ExitCode = cloneInt(s.exitCode)
+	out.Generation = s.outputGeneration
+	out.ReadFrom = int(total)
+	out.ReadCount = 0
+	out.TotalLines = int(total)
+	out.Remaining = 0
+	out.EvictedLines = s.evictedLines
+	out.WaitingForInput = s.waitingForInput
+	out.RuntimeMS = time.Since(s.startedAt).Milliseconds()
+	return cursor
+}
+
+func (m *Manager) fillBatchJobFailureTail(job *batchJob, cursor batchJobCursor, out *BatchJobResult, maxBytes int) batchJobCursor {
 	s := job.session
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	lines := s.snapshotLinesLocked()
 	streams := s.snapshotStreamsLocked()
+	separate := s.separateStreams && !s.usePTY
+	retainedStart := s.evictedLines
+	total := retainedStart + int64(len(lines))
+	budget := fitTailBudget(lines, streams, separate, m.opts.FailureTailLines, maxBytes)
+	selectedStart := total - int64(budget.consumedLines)
+	out.FailureTail = true
+	out.OmittedBefore = int(max(0, selectedStart-retainedStart))
+	out.OutputTruncated = budget.truncated || out.OmittedBefore > 0 || retainedStart > 0
+	out.OmittedBytes = budget.omittedBytes
+	out.BytesReturned = budget.bytesReturned
+	out.ReadFrom = int(selectedStart)
+	out.ReadCount = budget.consumedLines
+	out.TotalLines = int(total)
+	out.Remaining = 0
+	if separate {
+		out.Streams = budget.streams
+	} else {
+		out.Lines = budget.lines
+	}
+	cursor.OutputAbs = total
+	cursor.OutputGeneration = s.outputGeneration
+	out.ExitCode = cloneInt(s.exitCode)
+	out.Generation = s.outputGeneration
+	out.EvictedLines = s.evictedLines
+	out.WaitingForInput = s.waitingForInput
+	out.RuntimeMS = time.Since(s.startedAt).Milliseconds()
+	return cursor
+}
+
+func (m *Manager) fillBatchJobDelta(job *batchJob, cursor batchJobCursor, out *BatchJobResult, length, maxBytes int) batchJobCursor {
+	s := job.session
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lines := s.snapshotLinesLocked()
+	streams := s.snapshotStreamsLocked()
+	separate := s.separateStreams && !s.usePTY
 	retainedStart := s.evictedLines
 	total := retainedStart + int64(len(lines))
 	start := cursor.OutputAbs
+	fresh := cursor.OutputAbs == 0 && cursor.OutputGeneration == 0 && cursor.ChangeGeneration == 0
 	if start < retainedStart {
 		out.CursorEvicted = true
 		start = retainedStart
@@ -705,27 +816,62 @@ func fillBatchJobDelta(job *batchJob, cursor batchJobCursor, out *BatchJobResult
 	if start > total {
 		start = total
 	}
-	end := start + int64(length)
-	if end > total {
-		end = total
-	}
-	localStart, localEnd := int(start-retainedStart), int(end-retainedStart)
-	if s.separateStreams && !s.usePTY {
-		out.Streams = append([]StreamLine(nil), streams[localStart:localEnd]...)
+
+	// For a fresh snapshot of a failed job, return the newest bounded failure
+	// evidence rather than the beginning of a huge build log. Earlier retained
+	// output remains available through the per-PID output API.
+	if fresh && hasFailureText(job.state) && total > retainedStart {
+		lineStart := int64(0)
+		if int64(m.opts.FailureTailLines) < total-retainedStart {
+			lineStart = total - retainedStart - int64(m.opts.FailureTailLines)
+		}
+		localStart := int(lineStart)
+		budget := fitTailBudget(lines[localStart:], streams[localStart:], separate, m.opts.FailureTailLines, maxBytes)
+		selectedStart := total - int64(budget.consumedLines)
+		out.FailureTail = true
+		out.OmittedBefore = int(selectedStart - retainedStart)
+		out.OutputTruncated = budget.truncated || out.OmittedBefore > 0
+		out.OmittedBytes = budget.omittedBytes
+		out.BytesReturned = budget.bytesReturned
+		out.ReadFrom = int(selectedStart)
+		out.ReadCount = budget.consumedLines
+		out.TotalLines = int(total)
+		out.Remaining = 0
+		if separate {
+			out.Streams = budget.streams
+		} else {
+			out.Lines = budget.lines
+		}
+		cursor.OutputAbs = total
+		cursor.OutputGeneration = s.outputGeneration
 	} else {
-		out.Lines = append([]string(nil), lines[localStart:localEnd]...)
+		lineEnd := start + int64(length)
+		if lineEnd > total {
+			lineEnd = total
+		}
+		localStart, localEnd := int(start-retainedStart), int(lineEnd-retainedStart)
+		budget := fitForwardBudget(lines[localStart:localEnd], streams[localStart:localEnd], separate, maxBytes)
+		end := start + int64(budget.consumedLines)
+		if separate {
+			out.Streams = budget.streams
+		} else {
+			out.Lines = budget.lines
+		}
+		if end == start && s.outputGeneration > cursor.OutputGeneration {
+			out.LatestLine = s.latestLineLocked()
+		}
+		cursor.OutputAbs = end
+		cursor.OutputGeneration = s.outputGeneration
+		out.ReadFrom = int(start)
+		out.ReadCount = budget.consumedLines
+		out.TotalLines = int(total)
+		out.Remaining = int(total - end)
+		out.BytesReturned = budget.bytesReturned
+		out.OutputTruncated = budget.truncated
+		out.OmittedBytes = budget.omittedBytes
 	}
-	if end == start && s.outputGeneration > cursor.OutputGeneration {
-		out.LatestLine = s.latestLineLocked()
-	}
-	cursor.OutputAbs = end
-	cursor.OutputGeneration = s.outputGeneration
 	out.ExitCode = cloneInt(s.exitCode)
 	out.Generation = s.outputGeneration
-	out.ReadFrom = int(start)
-	out.ReadCount = int(end - start)
-	out.TotalLines = int(total)
-	out.Remaining = int(total - end)
 	out.EvictedLines = s.evictedLines
 	out.WaitingForInput = s.waitingForInput
 	out.RuntimeMS = time.Since(s.startedAt).Milliseconds()

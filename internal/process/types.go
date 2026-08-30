@@ -39,6 +39,9 @@ type StartResult struct {
 	ReadCount       int          `json:"read_count"`
 	TotalLines      int          `json:"total_lines"`
 	Remaining       int          `json:"remaining"`
+	BytesReturned   int          `json:"bytes_returned"`
+	OutputTruncated bool         `json:"output_truncated,omitempty"`
+	OmittedBytes    int          `json:"omitted_bytes,omitempty"`
 	EvictedLines    int64        `json:"evicted_lines"`
 	WaitedMS        int64        `json:"waited_ms"`
 	WaitingForInput bool         `json:"waiting_for_input"`
@@ -49,6 +52,7 @@ type OutputRequest struct {
 	TimeoutMS int
 	Offset    int
 	Length    int
+	MaxBytes  int
 }
 
 type OutputResult struct {
@@ -63,6 +67,9 @@ type OutputResult struct {
 	ReadCount       int          `json:"read_count"`
 	TotalLines      int          `json:"total_lines"`
 	Remaining       int          `json:"remaining"`
+	BytesReturned   int          `json:"bytes_returned"`
+	OutputTruncated bool         `json:"output_truncated,omitempty"`
+	OmittedBytes    int          `json:"omitted_bytes,omitempty"`
 	EvictedLines    int64        `json:"evicted_lines"`
 	WaitingForInput bool         `json:"waiting_for_input"`
 	RuntimeMS       int64        `json:"runtime_ms"`

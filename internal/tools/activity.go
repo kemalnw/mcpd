@@ -61,9 +61,11 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = append(attrs, slog.Bool("separate_streams", v.SeparateStreams))
 		return attrs
 	case StartProcessBatchInput:
-		return []slog.Attr{slog.Int("job_count", len(v.Jobs)), slog.Int("max_parallel", v.MaxParallel), slog.Int("initial_wait_ms", v.InitialWaitMS), slog.Bool("has_idempotency_key", strings.TrimSpace(v.IdempotencyKey) != "")}
+		attrs := []slog.Attr{slog.Int("job_count", len(v.Jobs)), slog.Int("max_parallel", v.MaxParallel), slog.Int("initial_wait_ms", v.InitialWaitMS), slog.Bool("has_idempotency_key", strings.TrimSpace(v.IdempotencyKey) != "")}
+		return appendLogString(attrs, "output_mode", v.OutputMode, maxMetadataLogBytes)
 	case ReadProcessBatchInput:
-		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS), slog.Int("length", v.Length)}
+		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS), slog.Int("length", v.Length), slog.Int("max_bytes_per_job", v.MaxBytesPerJob)}
+		attrs = appendLogString(attrs, "output_mode", v.OutputMode, maxMetadataLogBytes)
 		if v.OnlyChanged != nil {
 			attrs = append(attrs, slog.Bool("only_changed", *v.OnlyChanged))
 		}
@@ -71,7 +73,7 @@ func toolInputAttrs(in any) []slog.Attr {
 	case BatchIDInput:
 		return appendLogString(nil, "batch_id", v.BatchID, maxMetadataLogBytes)
 	case ReadProcessOutputInput:
-		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("timeout_ms", v.TimeoutMS), slog.Int("offset", v.Offset), slog.Int("length", v.Length)}
+		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("timeout_ms", v.TimeoutMS), slog.Int("offset", v.Offset), slog.Int("length", v.Length), slog.Int("max_bytes", v.MaxBytes)}
 	case InteractWithProcessInput:
 		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("input_bytes", len(v.Input)), slog.Int("input_lines", lineCount(v.Input)), slog.Int("timeout_ms", v.TimeoutMS), slog.Bool("raw_input", v.RawInput)}
 	case ResizePTYInput:
@@ -122,9 +124,12 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs := []slog.Attr{slog.Uint64("expected_revision", v.ExpectedRevision), slog.Int("item_count", len(v.Items)), slog.Int("next_action_count", len(v.NextActions))}
 		return appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
 	case GetRunInput:
-		return appendLogString(nil, "run_id", v.RunID, maxMetadataLogBytes)
+		attrs := []slog.Attr{slog.Int("item_offset", v.ItemOffset), slog.Int("item_limit", v.ItemLimit), slog.Int("criteria_offset", v.CriteriaOffset), slog.Int("criteria_limit", v.CriteriaLimit), slog.Int("next_action_offset", v.NextActionOffset), slog.Int("next_action_limit", v.NextActionLimit)}
+		return appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
+	case ListRunsInput:
+		return []slog.Attr{slog.Int("offset", v.Offset), slog.Int("limit", v.Limit)}
 	case ReadRunJobLogInput:
-		attrs := []slog.Attr{slog.Int("tail_lines", v.TailLines)}
+		attrs := []slog.Attr{slog.Int("tail_lines", v.TailLines), slog.Int("max_bytes", v.MaxBytes)}
 		attrs = appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
 		return appendLogString(attrs, "job_id", v.JobID, maxMetadataLogBytes)
 	case HandoffRunInput:

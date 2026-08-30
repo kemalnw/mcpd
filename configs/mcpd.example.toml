@@ -11,6 +11,8 @@ default_wait_ms = 30000
 # Maximum process-output lines returned directly by start_process; remaining
 # retained output is available through read_process_output.
 initial_output_lines = 200
+response_output_bytes = 65536
+failure_tail_lines = 100
 output_buffer_bytes = 52428800
 max_line_bytes = 1048576
 completed_sessions = 100

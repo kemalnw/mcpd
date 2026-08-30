@@ -31,11 +31,15 @@ func (m *Manager) ReadOutput(ctx context.Context, req OutputRequest) (OutputResu
 	if req.Length <= 0 {
 		req.Length = defaultReadLength
 	}
+	maxBytes, err := effectiveResponseBytes(req.MaxBytes, m.opts.ResponseOutputBytes)
+	if err != nil {
+		return OutputResult{}, err
+	}
 
 	if req.Offset == 0 {
 		m.waitForUnreadOutput(ctx, s, time.Duration(req.TimeoutMS)*time.Millisecond)
 	}
-	return readPaginated(s, req.Offset, req.Length), nil
+	return readPaginated(s, req.Offset, req.Length, maxBytes), nil
 }
 
 func (m *Manager) waitForUnreadOutput(ctx context.Context, s *session, timeout time.Duration) {
@@ -61,7 +65,7 @@ func (m *Manager) waitForUnreadOutput(ctx context.Context, s *session, timeout t
 	}
 }
 
-func readPaginated(s *session, offset, length int) OutputResult {
+func readPaginated(s *session, offset, length, maxBytes int) OutputResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -92,8 +96,10 @@ func readPaginated(s *session, offset, length int) OutputResult {
 
 	localStart := int(start - retainedStart)
 	localEnd := int(end - retainedStart)
-	selected := append([]string(nil), lines[localStart:localEnd]...)
-	selectedStreams := append([]StreamLine(nil), streamLines[localStart:localEnd]...)
+	budget := fitForwardBudget(lines[localStart:localEnd], streamLines[localStart:localEnd], s.separateStreams && !s.usePTY, maxBytes)
+	end = start + int64(budget.consumedLines)
+	selected := budget.lines
+	selectedStreams := budget.streams
 	var latest *StreamLine
 	if offset == 0 {
 		if len(selected) == 0 && generationChanged {
@@ -109,7 +115,7 @@ func readPaginated(s *session, offset, length int) OutputResult {
 	result := OutputResult{
 		PID: s.pid, State: state, ExitCode: cloneInt(s.exitCode), Generation: s.outputGeneration,
 		LatestLine: latest, ReadFrom: int(start), ReadCount: len(selected), TotalLines: int(total), Remaining: int(total - end),
-		EvictedLines: s.evictedLines, WaitingForInput: s.waitingForInput,
+		BytesReturned: budget.bytesReturned, OutputTruncated: budget.truncated, OmittedBytes: budget.omittedBytes, EvictedLines: s.evictedLines, WaitingForInput: s.waitingForInput,
 		RuntimeMS: time.Since(s.startedAt).Milliseconds(),
 	}
 	if s.separateStreams && !s.usePTY {

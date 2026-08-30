@@ -23,6 +23,8 @@ type Options struct {
 	DefaultShell        string
 	DefaultWaitMS       int
 	InitialOutputLines  int
+	ResponseOutputBytes int
+	FailureTailLines    int
 	OutputBufferBytes   int
 	MaxLineBytes        int
 	CompletedSessions   int
@@ -52,6 +54,12 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.InitialOutputLines == 0 {
 		opts.InitialOutputLines = defaultInitialOutputLines
 	}
+	if opts.ResponseOutputBytes == 0 {
+		opts.ResponseOutputBytes = 64 << 10
+	}
+	if opts.FailureTailLines == 0 {
+		opts.FailureTailLines = 100
+	}
 	if opts.BatchMaxParallel == 0 {
 		opts.BatchMaxParallel = 4
 	}
@@ -59,7 +67,7 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.BatchGlobalParallel == 0 {
 		opts.BatchGlobalParallel = recommendedGlobalParallel(resources)
 	}
-	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 || opts.BatchGlobalParallel <= 0 {
+	if opts.InitialOutputLines < 0 || opts.ResponseOutputBytes <= 0 || opts.FailureTailLines <= 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 || opts.BatchGlobalParallel <= 0 {
 		return nil, errors.New("invalid process manager limits")
 	}
 	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), batchIdempotency: make(map[string]batchIdempotencyRecord), opts: opts, signalGroup: signalProcessGroup, globalLimiter: newWeightedLimiter(opts.BatchGlobalParallel), resourceProbe: hostResources}, nil
@@ -86,7 +94,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 		PID: info.PID, Command: info.Command, CWD: info.CWD, Shell: info.Shell, PTY: info.PTY,
 		State: info.State, StartedAt: info.StartedAt, ExitCode: info.ExitCode,
 		ReadFrom: page.ReadFrom, ReadCount: page.ReadCount,
-		TotalLines: page.TotalLines, Remaining: page.Remaining, EvictedLines: page.EvictedLines,
+		TotalLines: page.TotalLines, Remaining: page.Remaining, BytesReturned: page.BytesReturned, OutputTruncated: page.OutputTruncated, OmittedBytes: page.OmittedBytes, EvictedLines: page.EvictedLines,
 		WaitedMS: time.Since(started).Milliseconds(), WaitingForInput: info.WaitingForInput,
 	}
 	if req.SeparateStreams && !info.PTY {
@@ -286,13 +294,16 @@ func (m *Manager) ListSessions() []SessionInfo {
 }
 
 type initialOutputPage struct {
-	Lines        []string
-	Streams      []StreamLine
-	ReadFrom     int
-	ReadCount    int
-	TotalLines   int
-	Remaining    int
-	EvictedLines int64
+	Lines           []string
+	Streams         []StreamLine
+	ReadFrom        int
+	ReadCount       int
+	TotalLines      int
+	Remaining       int
+	BytesReturned   int
+	OutputTruncated bool
+	OmittedBytes    int
+	EvictedLines    int64
 }
 
 func (m *Manager) readInitialOutput(s *session) initialOutputPage {
@@ -302,20 +313,20 @@ func (m *Manager) readInitialOutput(s *session) initialOutputPage {
 	lines := s.snapshotLinesLocked()
 	retainedStart := s.evictedLines
 	total := retainedStart + int64(len(lines))
-	end := retainedStart + int64(m.opts.InitialOutputLines)
-	if end > total {
-		end = total
+	lineEnd := retainedStart + int64(m.opts.InitialOutputLines)
+	if lineEnd > total {
+		lineEnd = total
 	}
-	localEnd := int(end - retainedStart)
-	selected := append([]string(nil), lines[:localEnd]...)
+	localEnd := int(lineEnd - retainedStart)
 	streamLines := s.snapshotStreamsLocked()
-	selectedStreams := append([]StreamLine(nil), streamLines[:localEnd]...)
+	budget := fitForwardBudget(lines[:localEnd], streamLines[:localEnd], s.separateStreams && !s.usePTY, m.opts.ResponseOutputBytes)
+	end := retainedStart + int64(budget.consumedLines)
 	if end > s.lastReadAbs {
 		s.lastReadAbs = end
 	}
 	s.lastReadGeneration = s.outputGeneration
 	return initialOutputPage{
-		Lines: selected, Streams: selectedStreams, ReadFrom: int(retainedStart), ReadCount: len(selected), TotalLines: int(total),
-		Remaining: int(total - end), EvictedLines: s.evictedLines,
+		Lines: budget.lines, Streams: budget.streams, ReadFrom: int(retainedStart), ReadCount: budget.consumedLines, TotalLines: int(total),
+		Remaining: int(total - end), BytesReturned: budget.bytesReturned, OutputTruncated: budget.truncated, OmittedBytes: budget.omittedBytes, EvictedLines: s.evictedLines,
 	}
 }

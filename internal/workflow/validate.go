@@ -6,9 +6,37 @@ import (
 	"strings"
 )
 
+const (
+	MaxRunTitleBytes        = 4 << 10
+	MaxRunObjectiveBytes    = 64 << 10
+	MaxRunPhaseBytes        = 1024
+	MaxRunCriteriaItems     = 100
+	MaxRunNextActions       = 100
+	MaxRunItems             = 5000
+	MaxRunListItemBytes     = 8 << 10
+	MaxWorkItemIDBytes      = 128
+	MaxWorkItemTitleBytes   = 4 << 10
+	MaxWorkItemSummaryBytes = 16 << 10
+	MaxWorkItemHandleBytes  = 2048
+	MaxWorkItemDependencies = 100
+)
+
 func ValidateRun(run Run) error {
 	if run.SchemaVersion != SchemaVersion || strings.TrimSpace(run.ID) == "" || run.Revision == 0 || strings.TrimSpace(run.Title) == "" {
 		return errors.New("run identity/schema/title is invalid")
+	}
+	if len(run.Title) > MaxRunTitleBytes || len(run.Objective) > MaxRunObjectiveBytes || len(run.Phase) > MaxRunPhaseBytes {
+		return errors.New("run title/objective/phase exceeds durable field budget")
+	}
+	if len(run.SuccessCriteria) > MaxRunCriteriaItems || len(run.NextActions) > MaxRunNextActions || len(run.Items) > MaxRunItems {
+		return errors.New("run criteria/next-actions/items exceeds durable item budget")
+	}
+	for _, values := range [][]string{run.SuccessCriteria, run.NextActions} {
+		for _, value := range values {
+			if len(value) > MaxRunListItemBytes {
+				return errors.New("run list item exceeds durable field budget")
+			}
+		}
 	}
 	switch run.State {
 	case RunPlanned, RunRunning, RunBlocked, RunCompleted, RunFailed, RunCanceled:
@@ -19,6 +47,13 @@ func ValidateRun(run Run) error {
 	for _, item := range run.Items {
 		if strings.TrimSpace(item.ID) == "" {
 			return errors.New("work item id is required")
+		}
+		if len(item.ID) > MaxWorkItemIDBytes || len(item.Title) > MaxWorkItemTitleBytes || len(item.Summary) > MaxWorkItemSummaryBytes ||
+			len(item.JobID) > MaxWorkItemHandleBytes || len(item.Branch) > MaxWorkItemHandleBytes || len(item.Worktree) > MaxWorkItemHandleBytes || len(item.PRURL) > MaxWorkItemHandleBytes {
+			return fmt.Errorf("work item %q exceeds durable field budget", item.ID)
+		}
+		if len(item.DependsOn) > MaxWorkItemDependencies {
+			return fmt.Errorf("work item %q has too many dependencies", item.ID)
 		}
 		if _, ok := seen[item.ID]; ok {
 			return fmt.Errorf("duplicate work item id %q", item.ID)
