@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/kemalnw/mcpd/internal/audit"
 	fsmgr "github.com/kemalnw/mcpd/internal/filesystem"
@@ -22,7 +23,7 @@ func RegisterFilesystem(server *mcp.Server, manager *fsmgr.Manager, auditStore *
 	mcp.AddTool(server, tool("list_directory", "List directory contents", "Use this to inspect the entries under a known directory path, optionally recursively to depth. Prefer start_search when looking for a filename or content across a larger tree; prefer get_file_info for metadata about one known path.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_directory", t.listDirectory))
 	mcp.AddTool(server, tool("move_file", "Move or rename a path", "Use this to rename or move an existing file or directory with the operating-system rename operation. This changes filesystem state. Do not use it for copying; MCPD does not currently expose a dedicated copy tool.", toolHints{destructive: true}), audited(auditStore, "move_file", t.moveFile))
 	mcp.AddTool(server, tool("get_file_info", "Inspect file metadata", "Use this when you need metadata for one known file or directory—such as size, permissions, timestamps, detected type, and text line metadata—without reading its contents. Prefer read_file when content is needed and list_directory when inspecting children of a directory.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "get_file_info", t.getFileInfo))
-	mcp.AddTool(server, tool("edit_block", "Edit part of a file", "Use this for precise edits to an existing file. In text mode, provide old_string and new_string; MCPD modifies the file only when the exact expected occurrence count matches, preventing ambiguous replacements. Prefer this over write_file for localized source/config edits. If no exact match exists, inspect the returned closest-match hint before retrying.", toolHints{destructive: true}), audited(auditStore, "edit_block", t.editBlock))
+	mcp.AddTool(server, tool("edit_block", "Edit part of a file", "Use this for precise edits to an existing file. For one change, provide old_string and new_string. For a multi-hunk refactor, provide edits; MCPD validates every exact hunk and overlap before one write, so any validation failure leaves the file unchanged. Prefer this over write_file for localized source/config edits. If no exact match exists, inspect the returned closest-match hint before retrying.", toolHints{destructive: true}), audited(auditStore, "edit_block", t.editBlock))
 }
 
 type ReadFileInput struct {
@@ -72,14 +73,21 @@ type GetFileInfoInput struct {
 	Path string `json:"path" jsonschema:"file or directory path"`
 }
 
+type EditBlockEditInput struct {
+	OldString            string  `json:"old_string" jsonschema:"exact text to replace"`
+	NewString            *string `json:"new_string" jsonschema:"replacement text; may be an empty string"`
+	ExpectedReplacements int     `json:"expected_replacements,omitempty" jsonschema:"exact occurrence count; defaults to 1"`
+}
+
 type EditBlockInput struct {
-	FilePath             string         `json:"file_path" jsonschema:"path of file to edit"`
-	OldString            string         `json:"old_string,omitempty" jsonschema:"exact text to replace for text files"`
-	NewString            *string        `json:"new_string,omitempty" jsonschema:"replacement text; may be an empty string"`
-	ExpectedReplacements int            `json:"expected_replacements,omitempty" jsonschema:"exact number of replacements expected; defaults to 1"`
-	Range                string         `json:"range,omitempty" jsonschema:"reserved for structured file range edits"`
-	Content              any            `json:"content,omitempty" jsonschema:"reserved replacement content for structured file range edits"`
-	Options              map[string]any `json:"options,omitempty" jsonschema:"format-specific edit options"`
+	FilePath             string               `json:"file_path" jsonschema:"path of file to edit"`
+	OldString            string               `json:"old_string,omitempty" jsonschema:"exact text to replace for a single text edit"`
+	NewString            *string              `json:"new_string,omitempty" jsonschema:"replacement text for a single edit; may be empty"`
+	ExpectedReplacements int                  `json:"expected_replacements,omitempty" jsonschema:"exact occurrence count for a single edit; defaults to 1"`
+	Edits                []EditBlockEditInput `json:"edits,omitempty" jsonschema:"atomic multi-hunk exact edits; use instead of old_string/new_string"`
+	Range                string               `json:"range,omitempty" jsonschema:"reserved for structured file range edits"`
+	Content              any                  `json:"content,omitempty" jsonschema:"reserved replacement content for structured file range edits"`
+	Options              map[string]any       `json:"options,omitempty" jsonschema:"format-specific edit options"`
 }
 
 func (t *FilesystemTools) readFile(ctx context.Context, in ReadFileInput) (fsmgr.ReadResult, error) {
@@ -115,16 +123,30 @@ func (t *FilesystemTools) getFileInfo(_ context.Context, in GetFileInfoInput) (f
 
 func (t *FilesystemTools) editBlock(ctx context.Context, in EditBlockInput) (fsmgr.EditResult, error) {
 	textMode := in.OldString != "" && in.NewString != nil
+	batchMode := len(in.Edits) > 0
 	structuredMode := in.Range != "" && in.Content != nil
-	if !textMode && !structuredMode {
-		return fsmgr.EditResult{}, errors.New("must provide either old_string + new_string or range + content")
+	modes := 0
+	for _, enabled := range []bool{textMode, batchMode, structuredMode} {
+		if enabled {
+			modes++
+		}
+	}
+	if modes != 1 {
+		return fsmgr.EditResult{}, errors.New("provide exactly one edit mode: old_string + new_string, edits, or range + content")
 	}
 	newString := ""
 	if in.NewString != nil {
 		newString = *in.NewString
 	}
+	edits := make([]fsmgr.TextEdit, 0, len(in.Edits))
+	for i, edit := range in.Edits {
+		if edit.OldString == "" || edit.NewString == nil {
+			return fsmgr.EditResult{}, fmt.Errorf("edits[%d] requires old_string and new_string", i)
+		}
+		edits = append(edits, fsmgr.TextEdit{OldString: edit.OldString, NewString: *edit.NewString, ExpectedReplacements: edit.ExpectedReplacements})
+	}
 	return t.manager.Edit(ctx, fsmgr.EditRequest{
-		Path: in.FilePath, OldString: in.OldString, NewString: newString,
+		Path: in.FilePath, OldString: in.OldString, NewString: newString, Edits: edits,
 		ExpectedReplacements: in.ExpectedReplacements, Range: in.Range, Content: in.Content, Options: in.Options,
 	})
 }

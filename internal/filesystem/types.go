@@ -101,18 +101,25 @@ type FileInfo struct {
 	AppendPosition *int       `json:"append_position,omitempty"`
 }
 
+type TextEdit struct {
+	OldString            string
+	NewString            string
+	ExpectedReplacements int
+}
+
 type EditRequest struct {
 	Path                 string
 	OldString            string
 	NewString            string
 	ExpectedReplacements int
+	Edits                []TextEdit
 	Range                string
 	Content              any
 	Options              map[string]any
 }
 
-type EditResult struct {
-	Path                 string  `json:"path"`
+type EditHunkResult struct {
+	Index                int     `json:"index"`
 	Applied              bool    `json:"applied"`
 	Replacements         int     `json:"replacements"`
 	ExpectedReplacements int     `json:"expected_replacements"`
@@ -120,4 +127,16 @@ type EditResult struct {
 	Similarity           float64 `json:"similarity,omitempty"`
 	Diff                 string  `json:"diff,omitempty"`
 	Message              string  `json:"message"`
+}
+
+type EditResult struct {
+	Path                 string           `json:"path"`
+	Applied              bool             `json:"applied"`
+	Replacements         int              `json:"replacements"`
+	ExpectedReplacements int              `json:"expected_replacements"`
+	ClosestMatch         string           `json:"closest_match,omitempty"`
+	Similarity           float64          `json:"similarity,omitempty"`
+	Diff                 string           `json:"diff,omitempty"`
+	Edits                []EditHunkResult `json:"edits,omitempty"`
+	Message              string           `json:"message"`
 }

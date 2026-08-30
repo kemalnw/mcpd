@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 )
@@ -18,52 +19,54 @@ func (m *Manager) Edit(ctx context.Context, req EditRequest) (EditResult, error)
 	if req.Range != "" || req.Content != nil {
 		return EditResult{}, fmt.Errorf("%w: range/content editing is reserved for structured file handlers", ErrUnsupportedFormat)
 	}
+	if len(req.Edits) > 0 {
+		if req.OldString != "" {
+			return EditResult{}, fmt.Errorf("%w: provide either edits or old_string/new_string, not both", ErrInvalidEdit)
+		}
+		return m.editMany(ctx, req.Path, req.Edits)
+	}
 	if req.OldString == "" {
 		return EditResult{}, fmt.Errorf("%w: old_string must not be empty", ErrInvalidEdit)
 	}
-	if req.ExpectedReplacements == 0 {
-		req.ExpectedReplacements = 1
+	return m.editOne(ctx, req.Path, TextEdit{OldString: req.OldString, NewString: req.NewString, ExpectedReplacements: req.ExpectedReplacements})
+}
+
+func (m *Manager) editOne(ctx context.Context, path string, edit TextEdit) (EditResult, error) {
+	if edit.ExpectedReplacements == 0 {
+		edit.ExpectedReplacements = 1
 	}
-	if req.ExpectedReplacements < 1 {
+	if edit.ExpectedReplacements < 1 {
 		return EditResult{}, fmt.Errorf("%w: expected_replacements must be at least 1", ErrInvalidEdit)
 	}
-	fileType, _, err := detectFileType(req.Path)
+	content, err := m.readEditableText(path)
 	if err != nil {
 		return EditResult{}, err
 	}
-	if fileType != FileTypeText {
-		return EditResult{}, fmt.Errorf("edit %q: %w: %s", req.Path, ErrUnsupportedFormat, fileType)
-	}
-	data, err := os.ReadFile(req.Path)
-	if err != nil {
-		return EditResult{}, fmt.Errorf("read %q for edit: %w", req.Path, err)
-	}
-	content := string(data)
-	count := strings.Count(content, req.OldString)
-	if count > 0 && count != req.ExpectedReplacements {
+	count := strings.Count(content, edit.OldString)
+	if count > 0 && count != edit.ExpectedReplacements {
 		return EditResult{
-			Path: req.Path, Applied: false, Replacements: count, ExpectedReplacements: req.ExpectedReplacements,
-			Message: fmt.Sprintf("expected %d occurrences but found %d; make old_string more specific or set expected_replacements to %d", req.ExpectedReplacements, count, count),
+			Path: path, Applied: false, Replacements: count, ExpectedReplacements: edit.ExpectedReplacements,
+			Message: fmt.Sprintf("expected %d occurrences but found %d; make old_string more specific or set expected_replacements to %d", edit.ExpectedReplacements, count, count),
 		}, nil
 	}
-	if count == req.ExpectedReplacements {
-		replaced := strings.ReplaceAll(content, req.OldString, req.NewString)
-		if err := rewritePreservingLinks(req.Path, []byte(replaced)); err != nil {
+	if count == edit.ExpectedReplacements {
+		replaced := strings.ReplaceAll(content, edit.OldString, edit.NewString)
+		if err := rewritePreservingLinks(path, []byte(replaced)); err != nil {
 			return EditResult{}, err
 		}
 		return EditResult{
-			Path: req.Path, Applied: true, Replacements: count, ExpectedReplacements: req.ExpectedReplacements,
+			Path: path, Applied: true, Replacements: count, ExpectedReplacements: edit.ExpectedReplacements,
 			Message: fmt.Sprintf("replaced %d occurrence(s)", count),
 		}, nil
 	}
 
-	closest, similarity, err := closestText(ctx, content, req.OldString)
+	closest, similarity, err := closestText(ctx, content, edit.OldString)
 	if err != nil {
 		return EditResult{}, err
 	}
 	result := EditResult{
-		Path: req.Path, Applied: false, ExpectedReplacements: req.ExpectedReplacements,
-		ClosestMatch: closest, Similarity: similarity, Diff: compactDiff(req.OldString, closest),
+		Path: path, Applied: false, ExpectedReplacements: edit.ExpectedReplacements,
+		ClosestMatch: closest, Similarity: similarity, Diff: compactDiff(edit.OldString, closest),
 	}
 	if similarity >= fuzzyThreshold {
 		result.Message = fmt.Sprintf("exact match not found; closest text is %.0f%% similar. Retry using the exact closest_match text", similarity*100)
@@ -71,6 +74,125 @@ func (m *Manager) Edit(ctx context.Context, req EditRequest) (EditResult, error)
 		result.Message = fmt.Sprintf("search content not found; closest text is only %.0f%% similar, below the %.0f%% fuzzy threshold", similarity*100, fuzzyThreshold*100)
 	}
 	return result, nil
+}
+
+type replacementRange struct {
+	start int
+	end   int
+	text  string
+	hunk  int
+}
+
+func (m *Manager) editMany(ctx context.Context, path string, edits []TextEdit) (EditResult, error) {
+	if len(edits) == 0 {
+		return EditResult{}, fmt.Errorf("%w: edits must not be empty", ErrInvalidEdit)
+	}
+	content, err := m.readEditableText(path)
+	if err != nil {
+		return EditResult{}, err
+	}
+	results := make([]EditHunkResult, len(edits))
+	ranges := make([]replacementRange, 0, len(edits))
+	totalExpected := 0
+	for i, edit := range edits {
+		if err := ctx.Err(); err != nil {
+			return EditResult{}, err
+		}
+		if edit.OldString == "" {
+			return EditResult{}, fmt.Errorf("%w: edits[%d].old_string must not be empty", ErrInvalidEdit, i)
+		}
+		if edit.ExpectedReplacements == 0 {
+			edit.ExpectedReplacements = 1
+		}
+		if edit.ExpectedReplacements < 1 {
+			return EditResult{}, fmt.Errorf("%w: edits[%d].expected_replacements must be at least 1", ErrInvalidEdit, i)
+		}
+		totalExpected += edit.ExpectedReplacements
+		occurrences := findOccurrences(content, edit.OldString)
+		hunk := EditHunkResult{Index: i, Replacements: len(occurrences), ExpectedReplacements: edit.ExpectedReplacements}
+		if len(occurrences) != edit.ExpectedReplacements {
+			if len(occurrences) == 0 {
+				closest, similarity, err := closestText(ctx, content, edit.OldString)
+				if err != nil {
+					return EditResult{}, err
+				}
+				hunk.ClosestMatch = closest
+				hunk.Similarity = similarity
+				hunk.Diff = compactDiff(edit.OldString, closest)
+				hunk.Message = fmt.Sprintf("exact match not found; closest text is %.0f%% similar", similarity*100)
+			} else {
+				hunk.Message = fmt.Sprintf("expected %d occurrences but found %d", edit.ExpectedReplacements, len(occurrences))
+			}
+			results[i] = hunk
+			return EditResult{Path: path, Applied: false, Replacements: 0, ExpectedReplacements: totalExpected, Edits: results, Message: fmt.Sprintf("edit %d validation failed; file unchanged", i)}, nil
+		}
+		hunk.Message = fmt.Sprintf("validated %d occurrence(s)", len(occurrences))
+		results[i] = hunk
+		for _, start := range occurrences {
+			ranges = append(ranges, replacementRange{start: start, end: start + len(edit.OldString), text: edit.NewString, hunk: i})
+		}
+	}
+
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].start == ranges[j].start {
+			return ranges[i].end < ranges[j].end
+		}
+		return ranges[i].start < ranges[j].start
+	})
+	for i := 1; i < len(ranges); i++ {
+		if ranges[i].start < ranges[i-1].end {
+			left, right := ranges[i-1].hunk, ranges[i].hunk
+			results[left].Message = fmt.Sprintf("overlaps edit %d", right)
+			results[right].Message = fmt.Sprintf("overlaps edit %d", left)
+			return EditResult{Path: path, Applied: false, ExpectedReplacements: totalExpected, Edits: results, Message: fmt.Sprintf("edits %d and %d overlap; file unchanged", left, right)}, nil
+		}
+	}
+
+	replaced := content
+	for i := len(ranges) - 1; i >= 0; i-- {
+		r := ranges[i]
+		replaced = replaced[:r.start] + r.text + replaced[r.end:]
+	}
+	if err := rewritePreservingLinks(path, []byte(replaced)); err != nil {
+		return EditResult{}, err
+	}
+	for i := range results {
+		results[i].Applied = true
+		results[i].Message = fmt.Sprintf("replaced %d occurrence(s)", results[i].Replacements)
+	}
+	return EditResult{Path: path, Applied: true, Replacements: len(ranges), ExpectedReplacements: totalExpected, Edits: results, Message: fmt.Sprintf("applied %d edit hunk(s) with %d replacement(s)", len(edits), len(ranges))}, nil
+}
+
+func (m *Manager) readEditableText(path string) (string, error) {
+	fileType, _, err := detectFileType(path)
+	if err != nil {
+		return "", err
+	}
+	if fileType != FileTypeText {
+		return "", fmt.Errorf("edit %q: %w: %s", path, ErrUnsupportedFormat, fileType)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %q for edit: %w", path, err)
+	}
+	return string(data), nil
+}
+
+func findOccurrences(content, needle string) []int {
+	if needle == "" {
+		return nil
+	}
+	var out []int
+	for offset := 0; offset <= len(content)-len(needle); {
+		i := strings.Index(content[offset:], needle)
+		if i < 0 {
+			break
+		}
+		start := offset + i
+		out = append(out, start)
+		offset = start + len(needle)
+	}
+	return out
 }
 
 func rewritePreservingLinks(path string, data []byte) error {

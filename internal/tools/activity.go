@@ -85,7 +85,7 @@ func toolInputAttrs(in any) []slog.Attr {
 	case GetFileInfoInput:
 		return appendLogString(nil, "path", v.Path, maxMetadataLogBytes)
 	case EditBlockInput:
-		attrs := []slog.Attr{slog.Int("old_string_bytes", len(v.OldString)), slog.Int("expected_replacements", v.ExpectedReplacements)}
+		attrs := []slog.Attr{slog.Int("old_string_bytes", len(v.OldString)), slog.Int("expected_replacements", v.ExpectedReplacements), slog.Int("edit_count", len(v.Edits))}
 		if v.NewString != nil {
 			attrs = append(attrs, slog.Int("new_string_bytes", len(*v.NewString)))
 		}
