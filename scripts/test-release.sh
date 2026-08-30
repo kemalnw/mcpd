@@ -19,6 +19,15 @@ sh -n "$ROOT/scripts/package-release.sh"
 sh -n "$ROOT/scripts/install.sh"
 sh -n "$ROOT/scripts/verify-live-schema.sh"
 sh -n "$ROOT/scripts/test-schema-smoke.sh"
+sh -n "$ROOT/scripts/install-skill.sh"
+"$ROOT/scripts/validate-skills.py"
+SKILL_DEST="$TMP/skills"
+"$ROOT/scripts/install-skill.sh" mcpd-parallel-engineering "$SKILL_DEST" >/dev/null
+test -f "$SKILL_DEST/mcpd-parallel-engineering/SKILL.md"
+if "$ROOT/scripts/install-skill.sh" mcpd-parallel-engineering "$SKILL_DEST" >/dev/null 2>&1; then
+  echo "skill installer unexpectedly overwrote an existing skill" >&2
+  exit 1
+fi
 DIST_DIR="$TMP/dist-a" VERSION="$VERSION" COMMIT="$COMMIT" \
   SOURCE_DATE_EPOCH="$EPOCH" DATE="$DATE" "$ROOT/scripts/package-release.sh" >/dev/null
 DIST_DIR="$TMP/dist-b" VERSION="$VERSION" COMMIT="$COMMIT" \

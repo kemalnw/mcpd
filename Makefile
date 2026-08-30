@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X github.com/kemalnw/mcpd/internal/version.Commit=$(COMMIT) \
 	-X github.com/kemalnw/mcpd/internal/version.Date=$(DATE)
 
-.PHONY: build test test-race vet fmt fmt-check tidy check release-package release-test clean
+.PHONY: build test test-race vet fmt fmt-check tidy skills-check skill-install check release-package release-test clean
 
 build:
 	@mkdir -p $(OUT_DIR)
@@ -32,7 +32,13 @@ fmt-check:
 tidy:
 	go mod tidy
 
-check: fmt-check vet test
+skills-check:
+	./scripts/validate-skills.py
+
+skill-install:
+	./scripts/install-skill.sh
+
+check: fmt-check vet test skills-check
 	@git diff --check
 
 release-package:
