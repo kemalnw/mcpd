@@ -351,3 +351,7 @@ pattern, backend, status, runtime, total results, and total matches.
 
 Excel and DOCX content search will later merge format-aware results into this
 same session contract rather than treating ZIP/XML containers as plain text.
+
+### Resumable batch cursors
+
+`read_process_batch` returns only changed jobs by default. Batch observation uses an opaque **caller-owned cursor** returned by `start_process_batch` / each batch read. Pass that cursor back on continuation reads so separate agents/clients can observe the same batch independently without consuming a shared server cursor. A changed-only read without a cursor establishes a baseline at call time and waits for the next change; a fresh/resumed agent should take a bounded snapshot first. Cursor eviction is explicit via `cursor_evicted` / `evicted_lines`, while per-PID `read_process_output` remains independent.
