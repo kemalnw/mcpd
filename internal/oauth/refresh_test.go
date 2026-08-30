@@ -285,12 +285,26 @@ func TestRefreshTokenSlidingIdleExpiration(t *testing.T) {
 	}
 }
 
-func TestOfflineAccessMustBeRequestedToIssueRefreshToken(t *testing.T) {
+func TestRefreshCapableClientGetsOfflineAccessWhenScopeIsOmitted(t *testing.T) {
+	env := newRefreshTestEnv(t, 30*24*time.Hour)
+	s := env.newServer(t)
+	response := env.authorize(t, s, "")
+	if response.RefreshToken == "" {
+		t.Fatalf("refresh-capable client did not receive refresh token when scope was omitted: %+v", response)
+	}
+	for _, scope := range []string{ScopeRead, ScopeWrite, ScopeOfflineAccess} {
+		if !hasScope(response.Scope, scope) {
+			t.Fatalf("default authorization scope %q lacks %q", response.Scope, scope)
+		}
+	}
+}
+
+func TestExplicitScopeWithoutOfflineAccessDoesNotIssueRefreshToken(t *testing.T) {
 	env := newRefreshTestEnv(t, 30*24*time.Hour)
 	s := env.newServer(t)
 	response := env.authorize(t, s, ScopeRead)
 	if response.RefreshToken != "" {
-		t.Fatalf("refresh token issued without offline_access: %+v", response)
+		t.Fatalf("refresh token issued after client explicitly omitted offline_access: %+v", response)
 	}
 }
 

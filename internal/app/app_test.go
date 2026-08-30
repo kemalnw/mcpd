@@ -333,6 +333,31 @@ func TestAuthEnabledToolCallChallengesBeforeOSExecution(t *testing.T) {
 		t.Fatalf("protected resource = %#v", metadata["resource"])
 	}
 
+	resp, err = httpClient.Get(httpServer.URL + "/.well-known/openid-configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("OpenID compatibility discovery status = %d, want 200", resp.StatusCode)
+	}
+	metadata = nil
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["issuer"] != "https://mcp.example" {
+		t.Fatalf("OpenID compatibility discovery issuer = %#v", metadata["issuer"])
+	}
+	scopes, ok := metadata["scopes_supported"].([]any)
+	if !ok {
+		t.Fatalf("OpenID compatibility discovery scopes = %#v", metadata["scopes_supported"])
+	}
+	for _, scope := range scopes {
+		if scope == "openid" {
+			t.Fatal("compatibility discovery must not advertise unsupported OpenID Connect scope")
+		}
+	}
+
 	client := mcp.NewClient(&mcp.Implementation{Name: "mcpd-auth-test", Version: "dev"}, nil)
 	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint: httpServer.URL + cfg.Server.MCPPath, HTTPClient: httpClient, DisableStandaloneSSE: true,

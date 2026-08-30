@@ -137,6 +137,10 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 			mux.HandleFunc("GET /.well-known/oauth-protected-resource"+cfg.Server.MCPPath, authServer.ProtectedResourceMetadata)
 		}
 		mux.HandleFunc("GET /.well-known/oauth-authorization-server", authServer.AuthorizationServerMetadata)
+		// Some OAuth clients probe OpenID discovery as a compatibility fallback.
+		// Return the OAuth authorization-server metadata without advertising
+		// openid scope or ID-token support; mcpd remains an OAuth AS, not an OIDC OP.
+		mux.HandleFunc("GET /.well-known/openid-configuration", authServer.AuthorizationServerMetadata)
 		mux.HandleFunc("GET /oauth/jwks.json", authServer.JWKS)
 		mux.HandleFunc("GET /oauth/authorize", authServer.Authorize)
 		mux.HandleFunc("POST /oauth/authorize", authServer.Authorize)
