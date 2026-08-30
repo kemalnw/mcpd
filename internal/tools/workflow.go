@@ -14,16 +14,19 @@ import (
 type WorkflowTools struct {
 	store              *workflowmgr.Store
 	checkpointInterval time.Duration
+	completedRetention time.Duration
+	gcMaxDeletes       int
 	now                func() time.Time
 }
 
-func RegisterWorkflow(server *mcp.Server, store *workflowmgr.Store, auditStore *audit.Store, checkpointInterval time.Duration) {
-	t := &WorkflowTools{store: store, checkpointInterval: checkpointInterval, now: func() time.Time { return time.Now().UTC() }}
+func RegisterWorkflow(server *mcp.Server, store *workflowmgr.Store, auditStore *audit.Store, checkpointInterval, completedRetention time.Duration, gcMaxDeletes int) {
+	t := &WorkflowTools{store: store, checkpointInterval: checkpointInterval, completedRetention: completedRetention, gcMaxDeletes: gcMaxDeletes, now: func() time.Time { return time.Now().UTC() }}
 	mcp.AddTool(server, tool("create_run", "Create a durable engineering run", "Use this at the beginning of substantial or long-horizon engineering work that may span many jobs, PRs, waits, or client reconnects. Store the stable objective and success criteria once; use checkpoint_run for mutable progress. The returned run_id is the durable resume handle.", toolHints{destructive: true}), audited(auditStore, "create_run", t.createRun))
 	mcp.AddTool(server, tool("checkpoint_run", "Checkpoint engineering progress", "Use this after meaningful workflow transitions such as implementation green, CI result, merge, blocker, or release step. expected_revision provides optimistic concurrency: read the latest run before retrying a revision conflict. Keep summaries and next actions compact; full command logs belong in job logs.", toolHints{destructive: true}), audited(auditStore, "checkpoint_run", t.checkpointRun))
 	mcp.AddTool(server, tool("get_run", "Resume a durable engineering run", "Use this with a known run_id to reconstruct current objective, work items, counts, blockers, and next actions without replaying chat history or command logs. A fresh client should prefer this over rediscovering completed work.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "get_run", t.getRun))
 	mcp.AddTool(server, tool("list_runs", "List durable engineering runs", "Use this to rediscover recent durable run handles and compact status when run_id is unknown. The result is a paginated metadata-only summary: it never inlines objectives, work-item bodies, next actions, or job logs.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_runs", t.listRuns))
 	mcp.AddTool(server, tool("read_run_job_log", "Read a durable job log tail", "Use this only when a run summary/failure indicates deeper execution evidence is needed. Returns a bounded tail from a disk-backed job log instead of loading the full log into model context.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "read_run_job_log", t.readJobLog))
+	mcp.AddTool(server, tool("collect_workflow_garbage", "Preview or collect stale workflow state", "Use this to preview retention cleanup or explicitly collect old terminal durable runs. It never deletes active or actively leased runs. The default is preview-only; set execute=true to perform bounded restart-safe cleanup. Normal automatic GC already runs from configured retention policy, so manual execution is mainly for disk-pressure or operator verification.", toolHints{destructive: true}), audited(auditStore, "collect_workflow_garbage", t.collectGarbage))
 	registerHandoffTools(server, t, auditStore)
 }
 
@@ -71,6 +74,12 @@ type GetRunInput struct {
 type ListRunsInput struct {
 	Offset int `json:"offset,omitempty" jsonschema:"zero-based offset into runs ordered by most recently updated"`
 	Limit  int `json:"limit,omitempty" jsonschema:"maximum compact run summaries; defaults to 50 and is capped at 200"`
+}
+
+type CollectWorkflowGarbageInput struct {
+	RetentionSeconds int  `json:"retention_seconds,omitempty" jsonschema:"terminal-run age threshold in seconds; defaults to configured workflow.completed_retention_seconds"`
+	MaxDeletes       int  `json:"max_deletes,omitempty" jsonschema:"maximum runs staged for deletion in one call; defaults to configured limit and is capped at 1000"`
+	Execute          bool `json:"execute,omitempty" jsonschema:"false previews eligible cleanup; true performs restart-safe bounded deletion"`
 }
 
 type ReadRunJobLogInput struct {
@@ -259,6 +268,24 @@ func (t *WorkflowTools) readJobLog(_ context.Context, in ReadRunJobLogInput) (Ru
 	}
 	bounded, bytesReturned, byteTruncated := boundTailBytes(tail, maxBytes)
 	return RunJobLogOutput{RunID: in.RunID, JobID: in.JobID, Lines: bounded, LinesReturned: len(bounded), BytesReturned: bytesReturned, MoreAvailable: more || byteTruncated, Truncated: more || byteTruncated}, nil
+}
+
+func (t *WorkflowTools) collectGarbage(_ context.Context, in CollectWorkflowGarbageInput) (workflowmgr.GCResult, error) {
+	retention := t.completedRetention
+	if in.RetentionSeconds < 0 {
+		return workflowmgr.GCResult{}, errors.New("retention_seconds must be >= 0")
+	}
+	if in.RetentionSeconds > 0 {
+		retention = time.Duration(in.RetentionSeconds) * time.Second
+	}
+	maxDeletes := t.gcMaxDeletes
+	if in.MaxDeletes < 0 {
+		return workflowmgr.GCResult{}, errors.New("max_deletes must be >= 0")
+	}
+	if in.MaxDeletes > 0 {
+		maxDeletes = in.MaxDeletes
+	}
+	return t.store.CollectGarbage(workflowmgr.GCPolicy{CompletedRetention: retention, MaxDeletes: maxDeletes, DryRun: !in.Execute})
 }
 
 func parseRunState(raw string) (workflowmgr.RunState, error) {

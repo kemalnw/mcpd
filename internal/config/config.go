@@ -26,6 +26,9 @@ const (
 	defaultBatchMaxParallel    = 4
 	defaultBatchGlobalParallel = 0 // auto from host resources
 	defaultCheckpointInterval  = 15 * 60
+	defaultWorkflowRetention   = 30 * 24 * 60 * 60
+	defaultWorkflowGCInterval  = 60 * 60
+	defaultWorkflowGCMaxDelete = 100
 	defaultFileReadLines       = 1000
 	defaultNestedEntries       = 100
 	defaultHTTPTimeoutSecs     = 15
@@ -81,8 +84,11 @@ type AuditConfig struct {
 }
 
 type WorkflowConfig struct {
-	StateDir                  string `toml:"state_dir"`
-	CheckpointIntervalSeconds int    `toml:"checkpoint_interval_seconds"`
+	StateDir                      string `toml:"state_dir"`
+	CheckpointIntervalSeconds     int    `toml:"checkpoint_interval_seconds"`
+	CompletedRetentionSeconds     int    `toml:"completed_retention_seconds"`
+	GarbageCollectIntervalSeconds int    `toml:"garbage_collect_interval_seconds"`
+	GarbageCollectMaxDeletes      int    `toml:"garbage_collect_max_deletes"`
 }
 
 type AuthConfig struct {
@@ -104,7 +110,7 @@ func Default() Config {
 		Files:    FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
 		Search:   SearchConfig{DefaultMaxResults: 1000, RetentionSeconds: 300, InitialWaitMS: 40},
 		Audit:    AuditConfig{Enabled: true, Path: defaultAuditPath()},
-		Workflow: WorkflowConfig{StateDir: filepath.Join(stateDir, "runs"), CheckpointIntervalSeconds: defaultCheckpointInterval},
+		Workflow: WorkflowConfig{StateDir: filepath.Join(stateDir, "runs"), CheckpointIntervalSeconds: defaultCheckpointInterval, CompletedRetentionSeconds: defaultWorkflowRetention, GarbageCollectIntervalSeconds: defaultWorkflowGCInterval, GarbageCollectMaxDeletes: defaultWorkflowGCMaxDelete},
 		Auth: AuthConfig{StateDir: filepath.Join(stateDir, "auth"), AccessTokenSeconds: 3600, RefreshTokenIdleSeconds: 30 * 24 * 60 * 60, AuthorizationCodeSeconds: 300,
 			LoginSessionSeconds: 600, ClientMetadataTimeoutSeconds: 10},
 	}
@@ -165,6 +171,9 @@ func (c Config) Validate() error {
 	}
 	if c.Workflow.CheckpointIntervalSeconds <= 0 {
 		return errors.New("workflow.checkpoint_interval_seconds must be positive")
+	}
+	if c.Workflow.CompletedRetentionSeconds <= 0 || c.Workflow.GarbageCollectIntervalSeconds <= 0 || c.Workflow.GarbageCollectMaxDeletes <= 0 || c.Workflow.GarbageCollectMaxDeletes > 1000 {
+		return errors.New("workflow retention/garbage-collection limits are invalid")
 	}
 	if c.Process.DefaultShell == "" {
 		return errors.New("process.default_shell must not be empty")

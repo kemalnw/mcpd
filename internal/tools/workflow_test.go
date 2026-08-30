@@ -19,7 +19,7 @@ func testWorkflowTools(t *testing.T) *WorkflowTools {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &WorkflowTools{store: store, checkpointInterval: 15 * time.Minute, now: func() time.Time { return time.Now().UTC() }}
+	return &WorkflowTools{store: store, checkpointInterval: 15 * time.Minute, completedRetention: 30 * 24 * time.Hour, gcMaxDeletes: 100, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func TestWorkflowCreateCheckpointResume(t *testing.T) {
@@ -209,5 +209,48 @@ func TestWorkflowRejectsOversizedAuthoritativeFields(t *testing.T) {
 	_, err = tools.checkpointRun(context.Background(), CheckpointRunInput{RunID: created.Run.ID, ExpectedRevision: created.Run.Revision, State: "running", ReplaceItems: true, Items: []RunWorkItemInput{{ID: "a", State: "running", Summary: strings.Repeat("s", workflowmgr.MaxWorkItemSummaryBytes+1)}}})
 	if err == nil {
 		t.Fatal("oversized authoritative item summary accepted")
+	}
+}
+
+func TestCollectWorkflowGarbageDefaultsToPreview(t *testing.T) {
+	tools := testWorkflowTools(t)
+	tools.completedRetention = time.Millisecond
+	created, err := tools.createRun(context.Background(), CreateRunInput{Title: "old terminal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tools.checkpointRun(context.Background(), CheckpointRunInput{RunID: created.Run.ID, ExpectedRevision: created.Run.Revision, State: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	preview, err := tools.collectGarbage(context.Background(), CollectWorkflowGarbageInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.DryRun || preview.EligibleRuns != 1 || preview.DeletedRuns != 0 {
+		t.Fatalf("preview=%+v", preview)
+	}
+	if _, err := tools.store.Get(created.Run.ID); err != nil {
+		t.Fatalf("preview deleted run: %v", err)
+	}
+	executed, err := tools.collectGarbage(context.Background(), CollectWorkflowGarbageInput{Execute: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed.DryRun || executed.DeletedRuns != 1 {
+		t.Fatalf("executed=%+v", executed)
+	}
+	if _, err := tools.store.Get(created.Run.ID); err == nil {
+		t.Fatal("executed GC kept terminal run")
+	}
+}
+
+func TestCollectWorkflowGarbageRejectsInvalidOverrides(t *testing.T) {
+	tools := testWorkflowTools(t)
+	if _, err := tools.collectGarbage(context.Background(), CollectWorkflowGarbageInput{RetentionSeconds: -1}); err == nil {
+		t.Fatal("negative retention accepted")
+	}
+	if _, err := tools.collectGarbage(context.Background(), CollectWorkflowGarbageInput{MaxDeletes: 1001}); err == nil {
+		t.Fatal("oversized delete bound accepted")
 	}
 }

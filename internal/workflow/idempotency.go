@@ -246,3 +246,88 @@ func (s *Store) ensureIdempotencyCapacityLocked(now time.Time) error {
 	}
 	return nil
 }
+
+func (s *Store) pruneExpiredIdempotencyLocked(now time.Time) (int, error) {
+	dir := filepath.Join(s.root, "idempotency")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("list idempotency records: %w", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		record, err := readIdempotencyRecord(path)
+		if err != nil {
+			return count, err
+		}
+		if record.ExpiresAt.After(now) {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return count, fmt.Errorf("remove expired idempotency record: %w", err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+func (s *Store) countExpiredIdempotencyLocked(now time.Time) (int, error) {
+	dir := filepath.Join(s.root, "idempotency")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("list idempotency records: %w", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		record, err := readIdempotencyRecord(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return count, err
+		}
+		if !record.ExpiresAt.After(now) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (s *Store) removeIdempotencyForRunLocked(runID string) (int, error) {
+	dir := filepath.Join(s.root, "idempotency")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("list idempotency records: %w", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		record, err := readIdempotencyRecord(path)
+		if err != nil {
+			return count, err
+		}
+		if record.RunID != runID {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return count, fmt.Errorf("remove run idempotency record: %w", err)
+		}
+		count++
+	}
+	return count, nil
+}
