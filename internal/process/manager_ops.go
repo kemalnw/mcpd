@@ -329,6 +329,10 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 
 func (m *Manager) Close() error {
 	m.cancelAllBatches()
+	// Batch cancellation can race with a worker between admission and process
+	// spawn. Wait for every scheduler/worker to finish before taking the final
+	// session snapshot so a late-spawned fixture cannot escape manager cleanup.
+	m.waitAllBatches()
 	m.mu.RLock()
 	pids := make([]int, 0, len(m.sessions))
 	for pid, s := range m.sessions {
