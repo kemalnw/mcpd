@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -421,5 +422,47 @@ func TestResizePTYRejectsNonPTYSession(t *testing.T) {
 	}
 	if err := m.ForceTerminate(result.PID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestForceTerminateCompletedSessionNeverSignalsReusedPID(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{Command: "true", TimeoutMS: 1000, PTY: PTYNever})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode == nil {
+		t.Fatalf("process did not complete: %+v", result)
+	}
+	calls := 0
+	m.signalGroup = func(pid int, sig syscall.Signal) error {
+		calls++
+		return errors.New("signal must not be called for completed session")
+	}
+	if err := m.ForceTerminate(result.PID); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("completed retained PID was signaled %d time(s)", calls)
+	}
+}
+
+func TestForceTerminateRunningSessionUsesManagedSignalPath(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{Command: "sleep 30", TimeoutMS: 10, PTY: PTYNever})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := m.signalGroup
+	calls := 0
+	m.signalGroup = func(pid int, sig syscall.Signal) error {
+		calls++
+		return original(pid, sig)
+	}
+	if err := m.ForceTerminate(result.PID); err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 {
+		t.Fatal("running managed process was not signaled")
 	}
 }

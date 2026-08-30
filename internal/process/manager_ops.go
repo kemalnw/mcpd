@@ -243,8 +243,17 @@ func (m *Manager) ForceTerminate(pid int) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	terminal := s.exitCode != nil
+	s.mu.Unlock()
+	// Completed sessions are retained for output/history. Their numeric PID may
+	// already have been reused by Linux, so an idempotent terminate of a
+	// terminal managed handle must never reach kill(2).
+	if terminal {
+		return nil
+	}
 	s.markStopping()
-	if err := signalProcessGroup(pid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := m.signalGroup(pid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("interrupt process %d: %w", pid, err)
 	}
 	select {
@@ -252,7 +261,7 @@ func (m *Manager) ForceTerminate(pid int) error {
 		return nil
 	case <-time.After(terminateGrace):
 	}
-	if err := signalProcessGroup(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := m.signalGroup(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("kill process %d: %w", pid, err)
 	}
 	select {
