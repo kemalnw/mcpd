@@ -131,6 +131,7 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 	tools.RegisterProcess(server, processes, auditStore)
 	tools.RegisterFilesystem(server, files, auditStore)
 	tools.RegisterSearch(server, searches, auditStore)
+	tools.RegisterWorkflow(server, workflowStore, auditStore)
 
 	streamableOpts := &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger,

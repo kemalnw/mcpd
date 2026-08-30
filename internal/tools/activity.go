@@ -105,6 +105,17 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = appendLogString(attrs, "path", v.FilePath, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "range", v.Range, maxMetadataLogBytes)
 		return attrs
+	case CreateRunInput:
+		return []slog.Attr{slog.Int("success_criteria_count", len(v.SuccessCriteria)), slog.Int("objective_bytes", len(v.Objective))}
+	case CheckpointRunInput:
+		attrs := []slog.Attr{slog.Uint64("expected_revision", v.ExpectedRevision), slog.Int("item_count", len(v.Items)), slog.Int("next_action_count", len(v.NextActions))}
+		return appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
+	case GetRunInput:
+		return appendLogString(nil, "run_id", v.RunID, maxMetadataLogBytes)
+	case ReadRunJobLogInput:
+		attrs := []slog.Attr{slog.Int("tail_lines", v.TailLines)}
+		attrs = appendLogString(attrs, "run_id", v.RunID, maxMetadataLogBytes)
+		return appendLogString(attrs, "job_id", v.JobID, maxMetadataLogBytes)
 	case StartSearchInput:
 		attrs := []slog.Attr{slog.Int("max_results", v.MaxResults), slog.Bool("include_hidden", v.IncludeHidden), slog.Int("timeout_ms", v.TimeoutMS)}
 		attrs = appendLogString(attrs, "path", v.Path, maxMetadataLogBytes)
