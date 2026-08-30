@@ -184,10 +184,15 @@ func (s *Server) authorizeGET(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resource must exactly match this MCP resource", http.StatusBadRequest)
 		return
 	}
-	scope, err := normalizeScope(q.Get("scope"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	rawScope := strings.TrimSpace(q.Get("scope"))
+	scope := ""
+	if rawScope != "" {
+		var err error
+		scope, err = normalizeScope(rawScope)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.opts.ClientMetadataTimeout)
 	defer cancel()
@@ -195,6 +200,17 @@ func (s *Server) authorizeGET(w http.ResponseWriter, r *http.Request) {
 	if err != nil || validateRedirectURI(metadata, redirectURI) != nil {
 		http.Error(w, "invalid OAuth client metadata or redirect URI", http.StatusBadRequest)
 		return
+	}
+	if scope == "" {
+		defaults := append([]string(nil), resourceScopes...)
+		if contains(metadata.GrantTypes, "refresh_token") {
+			// OAuth clients do not have a universal authorization-request parameter
+			// for asking for a refresh token. When a CIMD client omits scope but
+			// explicitly advertises the refresh_token grant, treat that capability
+			// as intent for offline access while preserving explicit scope choices.
+			defaults = append(defaults, ScopeOfflineAccess)
+		}
+		scope = strings.Join(defaults, " ")
 	}
 	txn, err := randomURLToken(32)
 	if err != nil {
