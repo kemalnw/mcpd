@@ -243,6 +243,9 @@ func (m *Manager) readInitialOutput(s *session) initialOutputPage {
 	}
 	localEnd := int(end - retainedStart)
 	selected := append([]string(nil), lines[:localEnd]...)
+	if end > s.lastReadAbs {
+		s.lastReadAbs = end
+	}
 	return initialOutputPage{
 		Lines: selected, ReadFrom: int(retainedStart), ReadCount: len(selected), TotalLines: int(total),
 		Remaining: int(total - end), EvictedLines: s.evictedLines,

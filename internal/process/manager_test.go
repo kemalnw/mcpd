@@ -42,8 +42,8 @@ func TestStartCapturesCompletedProcess(t *testing.T) {
 	if final.State != StateExited || final.ExitCode == nil || *final.ExitCode != 0 {
 		t.Fatalf("unexpected final result: %+v", final)
 	}
-	if got := strings.Join(final.Lines, "|"); got != "alpha|beta" {
-		t.Fatalf("output = %q", got)
+	if len(final.Lines) != 0 || final.ReadFrom != 2 {
+		t.Fatalf("initial output was repeated by cursor read: %+v", final)
 	}
 }
 
@@ -91,27 +91,32 @@ func TestStartCapsInitialOutputPage(t *testing.T) {
 }
 
 func TestReadOutputPaginationAndCursor(t *testing.T) {
-	m := testManager(t)
+	m, err := NewManager(Options{
+		DefaultShell: "/bin/bash", DefaultWaitMS: 250, InitialOutputLines: 1,
+		OutputBufferBytes: 1 << 20, MaxLineBytes: 1 << 16, CompletedSessions: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
 	result, err := m.Start(context.Background(), StartRequest{
 		Command: "printf '0\\n1\\n2\\n3\\n'", TimeoutMS: 1000, PTY: PTYNever,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := strings.Join(result.Output, ","); got != "0" || result.Remaining != 3 {
+		t.Fatalf("unexpected initial page: %+v", result)
+	}
 	waitForSessionExit(t, m, result.PID, 5*time.Second)
+
 	first, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 2, TimeoutMS: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(first.Lines, ","); got != "0,1" || first.Remaining != 2 {
-		t.Fatalf("unexpected first read: %+v", first)
-	}
-	second, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(second.Lines, ","); got != "2,3" {
-		t.Fatalf("unexpected second read: %+v", second)
+	if got := strings.Join(first.Lines, ","); got != "1,2" || first.Remaining != 1 {
+		t.Fatalf("unexpected first cursor read: %+v", first)
 	}
 	tail, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: -2, Length: 1})
 	if err != nil {
@@ -119,6 +124,48 @@ func TestReadOutputPaginationAndCursor(t *testing.T) {
 	}
 	if got := strings.Join(tail.Lines, ","); got != "2" {
 		t.Fatalf("unexpected tail read: %+v", tail)
+	}
+	absolute, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 1, Length: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(absolute.Lines, ","); got != "1" {
+		t.Fatalf("unexpected absolute read: %+v", absolute)
+	}
+	second, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(second.Lines, ","); got != "3" {
+		t.Fatalf("absolute/tail read moved cursor: %+v", second)
+	}
+}
+
+func TestStartCursorReadsOnlyFutureOutput(t *testing.T) {
+	m := testManager(t)
+	result, err := m.Start(context.Background(), StartRequest{
+		Command: "printf 'initial\\n'; sleep 1.5; printf 'later\\n'", TimeoutMS: 500, PTY: PTYNever,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == StateExited || strings.Join(result.Output, ",") != "initial" || result.ReadCount != 1 {
+		t.Fatalf("unexpected initial running-process result: %+v", result)
+	}
+	future, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 3000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(future.Lines, ","); got != "later" {
+		t.Fatalf("cursor returned initial output again or missed future output: %+v", future)
+	}
+	waitForSessionExit(t, m, result.PID, 5*time.Second)
+	final, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Lines) != 0 || final.State != StateExited || final.ExitCode == nil || *final.ExitCode != 0 {
+		t.Fatalf("unexpected final cursor/state result: %+v", final)
 	}
 }
 
