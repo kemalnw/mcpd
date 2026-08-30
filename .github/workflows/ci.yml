@@ -44,6 +44,9 @@ jobs:
       - name: Race detector
         run: make test-race
 
+      - name: Workflow benchmark regression
+        run: make benchmark-test
+
       - name: Build
         run: make build
 
