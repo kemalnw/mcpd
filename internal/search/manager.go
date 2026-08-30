@@ -18,10 +18,17 @@ import (
 )
 
 const (
-	defaultMaxResults  = 1000
-	defaultRetention   = 5 * time.Minute
-	defaultInitialWait = 40 * time.Millisecond
+	defaultMaxResults               = 1000
+	defaultRetention                = 5 * time.Minute
+	defaultInitialWait              = 40 * time.Millisecond
+	defaultWorkspaceIndexTTL        = 30 * time.Second
+	defaultWorkspaceIndexMaxEntries = 2048
 )
+
+type workspaceEntry struct {
+	Name string
+	Path string
+}
 
 type Manager struct {
 	mu       sync.RWMutex
@@ -30,10 +37,15 @@ type Manager struct {
 	rgPath   string
 	stop     chan struct{}
 	done     chan struct{}
+
+	workspaceMu         sync.Mutex
+	workspaceEntries    []workspaceEntry
+	workspaceIndexedAt  time.Time
+	workspaceIndexScans int
 }
 
 func NewManager(opts ManagerOptions) (*Manager, error) {
-	if opts.DefaultMaxResults < 0 || opts.Retention < 0 || opts.InitialWait < 0 {
+	if opts.DefaultMaxResults < 0 || opts.Retention < 0 || opts.InitialWait < 0 || opts.WorkspaceIndexTTL < 0 || opts.WorkspaceIndexMaxEntries < 0 {
 		return nil, errors.New("invalid search manager limits")
 	}
 	if opts.DefaultMaxResults == 0 {
@@ -44,6 +56,12 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 	}
 	if opts.InitialWait == 0 {
 		opts.InitialWait = defaultInitialWait
+	}
+	if opts.WorkspaceIndexTTL == 0 {
+		opts.WorkspaceIndexTTL = defaultWorkspaceIndexTTL
+	}
+	if opts.WorkspaceIndexMaxEntries == 0 {
+		opts.WorkspaceIndexMaxEntries = defaultWorkspaceIndexMaxEntries
 	}
 	preferredRoots := make([]string, 0, len(opts.PreferredRoots))
 	for _, root := range opts.PreferredRoots {
@@ -68,6 +86,7 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 	}
 	opts.PreferredRoots = preferredRoots
 	m := &Manager{sessions: make(map[string]*session), opts: opts, stop: make(chan struct{}), done: make(chan struct{})}
+	m.refreshWorkspaceIndex(time.Now())
 	if !opts.DisableRipgrep {
 		if opts.RipgrepPath != "" {
 			if _, err := os.Stat(opts.RipgrepPath); err != nil {
@@ -292,6 +311,9 @@ func (m *Manager) resolvePreferredRoot(opts Options) (string, bool) {
 	requested := filepath.Clean(opts.RootPath)
 	hint := strings.TrimSpace(opts.PathHint)
 	if hint != "" {
+		if dir := m.resolveWorkspaceHint(requested, hint); dir != "" {
+			return dir, true
+		}
 		for _, root := range m.opts.PreferredRoots {
 			if !pathWithin(requested, root) {
 				continue
@@ -324,6 +346,158 @@ func (m *Manager) resolvePreferredRoot(opts Options) (string, bool) {
 		return filepath.Dir(fallback), true
 	}
 	return "", false
+}
+
+func (m *Manager) resolveWorkspaceHint(requested, hint string) string {
+	m.ensureWorkspaceIndex(time.Now())
+	hint = strings.ToLower(strings.TrimSpace(filepath.Base(filepath.Clean(hint))))
+	if hint == "" {
+		return ""
+	}
+	m.workspaceMu.Lock()
+	entries := append([]workspaceEntry(nil), m.workspaceEntries...)
+	m.workspaceMu.Unlock()
+
+	choose := func(exact bool) (string, bool) {
+		candidates := make([]string, 0, 4)
+		stale := false
+		for _, entry := range entries {
+			if !pathWithin(requested, entry.Path) {
+				continue
+			}
+			matched := entry.Name == hint
+			if !exact {
+				matched = matched || strings.Contains(entry.Name, hint) || strings.Contains(strings.ToLower(filepath.ToSlash(entry.Path)), hint)
+			}
+			if !matched {
+				continue
+			}
+			if info, err := os.Stat(entry.Path); err != nil || !info.IsDir() {
+				stale = true
+				continue
+			}
+			candidates = append(candidates, entry.Path)
+		}
+		if stale {
+			m.refreshWorkspaceIndex(time.Now())
+		}
+		if len(candidates) == 0 {
+			return "", stale
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			di := strings.Count(filepath.ToSlash(candidates[i]), "/")
+			dj := strings.Count(filepath.ToSlash(candidates[j]), "/")
+			if di != dj {
+				return di < dj
+			}
+			return candidates[i] < candidates[j]
+		})
+		return candidates[0], stale
+	}
+	if path, stale := choose(true); path != "" {
+		return path
+	} else if stale {
+		m.workspaceMu.Lock()
+		entries = append([]workspaceEntry(nil), m.workspaceEntries...)
+		m.workspaceMu.Unlock()
+	}
+	path, _ := choose(false)
+	return path
+}
+
+func (m *Manager) ensureWorkspaceIndex(now time.Time) {
+	m.workspaceMu.Lock()
+	fresh := !m.workspaceIndexedAt.IsZero() && now.Sub(m.workspaceIndexedAt) < m.opts.WorkspaceIndexTTL
+	m.workspaceMu.Unlock()
+	if !fresh {
+		m.refreshWorkspaceIndex(now)
+	}
+}
+
+func (m *Manager) refreshWorkspaceIndex(now time.Time) {
+	entries := buildWorkspaceIndex(m.opts.PreferredRoots, m.opts.WorkspaceIndexMaxEntries)
+	m.workspaceMu.Lock()
+	m.workspaceEntries = entries
+	m.workspaceIndexedAt = now
+	m.workspaceIndexScans++
+	m.workspaceMu.Unlock()
+}
+
+var workspaceMarkers = map[string]struct{}{
+	"go.mod": {}, "package.json": {}, "Cargo.toml": {}, "pyproject.toml": {}, "pom.xml": {}, "build.gradle": {}, "build.gradle.kts": {}, "Gemfile": {}, "composer.json": {},
+}
+
+func buildWorkspaceIndex(roots []string, maxEntries int) []workspaceEntry {
+	if maxEntries <= 0 || len(roots) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	entries := make([]workspaceEntry, 0, min(maxEntries, 128))
+	add := func(path string) bool {
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok {
+			return len(entries) < maxEntries
+		}
+		seen[path] = struct{}{}
+		entries = append(entries, workspaceEntry{Name: strings.ToLower(filepath.Base(path)), Path: path})
+		return len(entries) < maxEntries
+	}
+	for _, root := range roots {
+		if len(entries) >= maxEntries {
+			break
+		}
+		root = filepath.Clean(root)
+		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				if errors.Is(walkErr, fs.ErrPermission) {
+					return nil
+				}
+				return walkErr
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			if rel != "." {
+				depth := strings.Count(filepath.ToSlash(rel), "/") + 1
+				if entry.IsDir() && depth > preferredSearchMaxDepth {
+					return filepath.SkipDir
+				}
+				if depth > preferredSearchMaxDepth+1 {
+					return nil
+				}
+			}
+			if entry.IsDir() {
+				if path != root {
+					if _, skip := preferredSearchSkipDirs[entry.Name()]; skip {
+						if entry.Name() == ".git" {
+							if !add(filepath.Dir(path)) {
+								return errStopSearch
+							}
+						}
+						return filepath.SkipDir
+					}
+					if strings.HasPrefix(entry.Name(), ".") {
+						return filepath.SkipDir
+					}
+				}
+				return nil
+			}
+			if _, ok := workspaceMarkers[entry.Name()]; ok {
+				if !add(filepath.Dir(path)) {
+					return errStopSearch
+				}
+			}
+			return nil
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Name != entries[j].Name {
+			return entries[i].Name < entries[j].Name
+		}
+		return entries[i].Path < entries[j].Path
+	})
+	return entries
 }
 
 func findPreferredHintDir(root, hint string, includeHidden bool) string {
