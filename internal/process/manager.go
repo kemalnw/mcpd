@@ -30,10 +30,11 @@ type Options struct {
 }
 
 type Manager struct {
-	mu        sync.RWMutex
-	sessions  map[int]*session
-	completed []int
-	opts      Options
+	mu          sync.RWMutex
+	sessions    map[int]*session
+	completed   []int
+	opts        Options
+	signalGroup func(int, syscall.Signal) error
 
 	batchMu          sync.Mutex
 	batches          map[string]*processBatch
@@ -53,7 +54,7 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 {
 		return nil, errors.New("invalid process manager limits")
 	}
-	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), opts: opts}, nil
+	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), opts: opts, signalGroup: signalProcessGroup}, nil
 }
 
 func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, error) {
