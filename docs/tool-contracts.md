@@ -96,6 +96,8 @@ Semantics:
 - Wait ends on process exit, detected interactive prompt, or timeout.
 - A running process is never killed merely because `timeout_ms` elapsed.
 - The returned `pid` is the real OS PID and is the explicit resource handle.
+- Initial process output is capped by `process.initial_output_lines` (default 200) even when more output is retained server-side.
+- The result includes `read_from`, `read_count`, `total_lines`, `remaining`, and `evicted_lines` so callers can detect truncated initial output and continue with `read_process_output`.
 
 ### `read_process_output`
 

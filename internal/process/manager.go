@@ -15,12 +15,15 @@ import (
 	"github.com/creack/pty"
 )
 
+const defaultInitialOutputLines = 200
+
 type Options struct {
-	DefaultShell      string
-	DefaultWaitMS     int
-	OutputBufferBytes int
-	MaxLineBytes      int
-	CompletedSessions int
+	DefaultShell       string
+	DefaultWaitMS      int
+	InitialOutputLines int
+	OutputBufferBytes  int
+	MaxLineBytes       int
+	CompletedSessions  int
 }
 
 type Manager struct {
@@ -34,7 +37,10 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.DefaultShell == "" {
 		return nil, errors.New("default shell is required")
 	}
-	if opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 {
+	if opts.InitialOutputLines == 0 {
+		opts.InitialOutputLines = defaultInitialOutputLines
+	}
+	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 {
 		return nil, errors.New("invalid process manager limits")
 	}
 	return &Manager{sessions: make(map[int]*session), opts: opts}, nil
@@ -73,11 +79,13 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	started := time.Now()
 	m.waitForStart(ctx, s, time.Duration(waitMS)*time.Millisecond)
 	info := s.snapshot()
-	lines := m.readAllRetained(s)
+	page := m.readInitialOutput(s)
 	return StartResult{
 		PID: info.PID, Command: info.Command, Shell: info.Shell, PTY: info.PTY,
 		State: info.State, StartedAt: info.StartedAt, ExitCode: info.ExitCode,
-		Output: lines, WaitedMS: time.Since(started).Milliseconds(), WaitingForInput: info.WaitingForInput,
+		Output: page.Lines, ReadFrom: page.ReadFrom, ReadCount: page.ReadCount,
+		TotalLines: page.TotalLines, Remaining: page.Remaining, EvictedLines: page.EvictedLines,
+		WaitedMS: time.Since(started).Milliseconds(), WaitingForInput: info.WaitingForInput,
 	}, nil
 }
 
@@ -213,8 +221,30 @@ func (m *Manager) ListSessions() []SessionInfo {
 	return out
 }
 
-func (m *Manager) readAllRetained(s *session) []string {
+type initialOutputPage struct {
+	Lines        []string
+	ReadFrom     int
+	ReadCount    int
+	TotalLines   int
+	Remaining    int
+	EvictedLines int64
+}
+
+func (m *Manager) readInitialOutput(s *session) initialOutputPage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.snapshotLinesLocked()
+
+	lines := s.snapshotLinesLocked()
+	retainedStart := s.evictedLines
+	total := retainedStart + int64(len(lines))
+	end := retainedStart + int64(m.opts.InitialOutputLines)
+	if end > total {
+		end = total
+	}
+	localEnd := int(end - retainedStart)
+	selected := append([]string(nil), lines[:localEnd]...)
+	return initialOutputPage{
+		Lines: selected, ReadFrom: int(retainedStart), ReadCount: len(selected), TotalLines: int(total),
+		Remaining: int(total - end), EvictedLines: s.evictedLines,
+	}
 }

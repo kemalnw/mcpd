@@ -26,6 +26,11 @@ type StartResult struct {
 	StartedAt       time.Time `json:"started_at"`
 	ExitCode        *int      `json:"exit_code,omitempty"`
 	Output          []string  `json:"output,omitempty"`
+	ReadFrom        int       `json:"read_from"`
+	ReadCount       int       `json:"read_count"`
+	TotalLines      int       `json:"total_lines"`
+	Remaining       int       `json:"remaining"`
+	EvictedLines    int64     `json:"evicted_lines"`
 	WaitedMS        int64     `json:"waited_ms"`
 	WaitingForInput bool      `json:"waiting_for_input"`
 }
