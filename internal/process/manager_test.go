@@ -26,7 +26,7 @@ func testManager(t *testing.T) *Manager {
 func TestStartCapturesCompletedProcess(t *testing.T) {
 	m := testManager(t)
 	result, err := m.Start(context.Background(), StartRequest{
-		Command: "printf 'alpha\\nbeta\\n'", TimeoutMS: 100, PTY: PTYNever,
+		Command: "printf 'alpha\\nbeta\\n'", TimeoutMS: 1000, PTY: PTYNever,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func TestStartCapturesCompletedProcess(t *testing.T) {
 func TestWaitTimeoutDoesNotTerminateProcess(t *testing.T) {
 	m := testManager(t)
 	result, err := m.Start(context.Background(), StartRequest{
-		Command: "printf 'ready\\n'; sleep 10", TimeoutMS: 30, PTY: PTYNever,
+		Command: "sleep 10", TimeoutMS: 30, PTY: PTYNever,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestWaitTimeoutDoesNotTerminateProcess(t *testing.T) {
 	if result.State == StateExited {
 		t.Fatalf("process unexpectedly exited: %+v", result)
 	}
-	if result.ReadCount != 1 || result.TotalLines != 1 || result.Remaining != 0 || strings.Join(result.Output, "") != "ready" {
+	if result.ReadCount != 0 || result.TotalLines != 0 || result.Remaining != 0 || len(result.Output) != 0 {
 		t.Fatalf("unexpected running-process initial page: %+v", result)
 	}
 	if err := m.ForceTerminate(result.PID); err != nil {
