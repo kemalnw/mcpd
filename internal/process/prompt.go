@@ -6,10 +6,16 @@ import (
 	"strings"
 )
 
-var promptPattern = regexp.MustCompile(`(?m)(>>> |\.\.\. |> |\$ |# |% |mysql> |sqlite> |psql[^\n]*[=#] )$`)
+var promptPattern = regexp.MustCompile(`(?:>>> |\.\.\. |> |\$ |# |% |mysql> |sqlite> |psql[^\r\n]*[=#] )$`)
 
 func looksLikePrompt(tail string) bool {
-	return promptPattern.MatchString(tail)
+	if tail == "" {
+		return false
+	}
+	if idx := strings.LastIndexAny(tail, "\r\n"); idx >= 0 {
+		tail = tail[idx+1:]
+	}
+	return tail != "" && promptPattern.MatchString(tail)
 }
 
 func resolvePTY(mode PTYMode, command string) (bool, error) {

@@ -94,6 +94,7 @@ Semantics:
 - Process is created before waiting.
 - `timeout_ms` limits the tool-call wait only.
 - Wait ends on process exit, detected interactive prompt, or timeout.
+- Prompt detection considers only the current terminal line after the most recent newline/carriage return; prompt-like text in historical output does not put the session into `waiting_for_input`.
 - A running process is never killed merely because `timeout_ms` elapsed.
 - The returned `pid` is the real OS PID and is the explicit resource handle.
 - Initial process output is capped by `process.initial_output_lines` (default 200) even when more output is retained server-side.
