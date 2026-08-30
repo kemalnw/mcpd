@@ -263,6 +263,7 @@ session.
 {
   "path": "string, required",
   "pattern": "string, required",
+  "pathHint": "string, optional; project/repository name used to prioritize likely workspace paths",
   "searchType": "files | content, optional; default files",
   "filePattern": "string, optional; pipe-separated globs",
   "ignoreCase": "boolean, optional; default true",
@@ -279,6 +280,14 @@ The call starts work in the background and returns after the first result chunk,
 completion, or the configured initial wait (40 ms by default). Exact filename
 searches inherit Desktop Commander-style 1500 ms default timeout when no timeout
 is supplied.
+
+When `path` is broad and the daemon has discovered conventional workspace roots
+(such as `~/src`, `~/workspace`, or `~/projects`), `pathHint` can name the intended
+project/repository. MCPD resolves that hint to a matching workspace directory before
+running the search, avoiding repeated searches from progressively broader roots.
+For exact filename searches with early termination and no hint, MCPD also checks
+workspace roots before noisy home-level dependency/cache trees. If no preferred
+match is found, normal broad-search semantics are preserved.
 
 Ripgrep is selected automatically when available. Otherwise a native Go walker
 provides the same MCP contract. The fallback does not currently interpret

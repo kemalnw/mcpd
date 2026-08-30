@@ -95,6 +95,7 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs := []slog.Attr{slog.Int("max_results", v.MaxResults), slog.Bool("include_hidden", v.IncludeHidden), slog.Int("timeout_ms", v.TimeoutMS)}
 		attrs = appendLogString(attrs, "path", v.Path, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "pattern", v.Pattern, maxMetadataLogBytes)
+		attrs = appendLogString(attrs, "path_hint", v.PathHint, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "search_type", v.SearchType, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "file_pattern", v.FilePattern, maxMetadataLogBytes)
 		return attrs

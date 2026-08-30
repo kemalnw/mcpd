@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,28 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 	if opts.InitialWait == 0 {
 		opts.InitialWait = defaultInitialWait
 	}
+	preferredRoots := make([]string, 0, len(opts.PreferredRoots))
+	for _, root := range opts.PreferredRoots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return nil, fmt.Errorf("resolve preferred search root %q: %w", root, err)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("stat preferred search root %q: %w", abs, err)
+		}
+		if info.IsDir() {
+			preferredRoots = append(preferredRoots, filepath.Clean(abs))
+		}
+	}
+	opts.PreferredRoots = preferredRoots
 	m := &Manager{sessions: make(map[string]*session), opts: opts, stop: make(chan struct{}), done: make(chan struct{})}
 	if !opts.DisableRipgrep {
 		if opts.RipgrepPath != "" {
@@ -173,6 +196,9 @@ func (m *Manager) normalizeAndValidate(opts *Options) error {
 		return fmt.Errorf("file search path %q must be a directory", abs)
 	}
 	opts.RootPath = abs
+	if preferred, ok := m.resolvePreferredRoot(*opts); ok {
+		opts.RootPath = preferred
+	}
 	if opts.MaxResults <= 0 {
 		opts.MaxResults = m.opts.DefaultMaxResults
 	}
@@ -251,6 +277,169 @@ func (m *Manager) cleanup(now time.Time) {
 			delete(m.sessions, id)
 		}
 	}
+}
+
+const preferredSearchMaxDepth = 4
+
+var preferredSearchSkipDirs = map[string]struct{}{
+	".git": {}, ".hg": {}, ".svn": {}, "node_modules": {}, "vendor": {},
+}
+
+func (m *Manager) resolvePreferredRoot(opts Options) (string, bool) {
+	if len(m.opts.PreferredRoots) == 0 {
+		return "", false
+	}
+	requested := filepath.Clean(opts.RootPath)
+	hint := strings.TrimSpace(opts.PathHint)
+	if hint != "" {
+		for _, root := range m.opts.PreferredRoots {
+			if !pathWithin(requested, root) {
+				continue
+			}
+			if dir := findPreferredHintDir(root, hint, opts.IncludeHidden); dir != "" {
+				return dir, true
+			}
+		}
+	}
+
+	if opts.SearchType != TypeFiles || !opts.EarlyTermination || !isExactFilename(opts.Pattern) || filepath.Base(opts.Pattern) != opts.Pattern {
+		return "", false
+	}
+	direct := filepath.Join(requested, opts.Pattern)
+	if isMatchingRegularFile(direct, opts) && matchesFilePatterns(filepath.Base(direct), opts.FilePattern, opts.IgnoreCase) {
+		return "", false
+	}
+
+	var fallback string
+	for _, root := range m.opts.PreferredRoots {
+		if !pathWithin(requested, root) {
+			continue
+		}
+		_, first := findPreferredExactFile(root, opts, "")
+		if fallback == "" && first != "" {
+			fallback = first
+		}
+	}
+	if fallback != "" {
+		return filepath.Dir(fallback), true
+	}
+	return "", false
+}
+
+func findPreferredHintDir(root, hint string, includeHidden bool) string {
+	root = filepath.Clean(root)
+	var found string
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrPermission) {
+				return nil
+			}
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		depth := strings.Count(filepath.ToSlash(rel), "/") + 1
+		if depth > preferredSearchMaxDepth {
+			return filepath.SkipDir
+		}
+		if _, skip := preferredSearchSkipDirs[entry.Name()]; skip {
+			return filepath.SkipDir
+		}
+		if !includeHidden && strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir
+		}
+		if pathMatchesHint(rel, hint) {
+			found = path
+			return errStopSearch
+		}
+		return nil
+	})
+	return found
+}
+
+func findPreferredExactFile(root string, opts Options, hint string) (hinted, first string) {
+	root = filepath.Clean(root)
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrPermission) {
+				return nil
+			}
+			return walkErr
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		depth := strings.Count(filepath.ToSlash(rel), "/") + 1
+		if entry.IsDir() {
+			if depth > preferredSearchMaxDepth {
+				return filepath.SkipDir
+			}
+			if _, skip := preferredSearchSkipDirs[entry.Name()]; skip {
+				return filepath.SkipDir
+			}
+			if !opts.IncludeHidden && strings.HasPrefix(entry.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if depth > preferredSearchMaxDepth || (!opts.IncludeHidden && strings.HasPrefix(entry.Name(), ".")) {
+			return nil
+		}
+		if !isMatchingRegularFile(path, opts) || !matchesFilePatterns(rel, opts.FilePattern, opts.IgnoreCase) {
+			return nil
+		}
+		if first == "" {
+			first = path
+		}
+		if hint != "" && pathMatchesHint(rel, hint) {
+			hinted = path
+			return errStopSearch
+		}
+		return nil
+	})
+	return hinted, first
+}
+
+func isMatchingRegularFile(path string, opts Options) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return exactFilenameMatch(path, opts.Pattern, opts.IgnoreCase)
+}
+
+func pathMatchesHint(path, hint string) bool {
+	path = strings.ToLower(filepath.ToSlash(path))
+	hint = strings.ToLower(strings.TrimSpace(filepath.ToSlash(hint)))
+	if hint == "" {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == hint {
+			return true
+		}
+	}
+	return strings.Contains(path, hint)
+}
+
+func pathWithin(parent, child string) bool {
+	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func newSessionID() string {

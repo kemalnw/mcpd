@@ -197,6 +197,52 @@ func writeTestFile(t *testing.T, path, content string) {
 	}
 }
 
+func TestPreferredRootPathHintNarrowsBroadSearch(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	writeTestFile(t, filepath.Join(src, "alpha", "go.mod"), "module alpha\n")
+	writeTestFile(t, filepath.Join(src, "mcpd", "go.mod"), "module github.com/kemalnw/mcpd\n")
+	m, err := NewManager(ManagerOptions{DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond, PreferredRoots: []string{src}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	start, err := m.Start(context.Background(), Options{RootPath: root, Pattern: "go.mod", PathHint: "mcpd", SearchType: TypeFiles, IgnoreCase: true, MaxResults: 10, EarlyTermination: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := waitSearchComplete(t, m, start.SessionID)
+	if read.TotalMatches != 1 || len(read.Results) != 1 || read.Results[0].File != filepath.Join(src, "mcpd", "go.mod") {
+		t.Fatalf("pathHint did not narrow to mcpd: %#v", read.Results)
+	}
+	s := m.get(start.SessionID)
+	if s == nil || s.opts.RootPath != filepath.Join(src, "mcpd") {
+		t.Fatalf("resolved root = %#v", s)
+	}
+}
+
+func TestPreferredRootExactFilenameAvoidsNoisyHome(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	writeTestFile(t, filepath.Join(src, "mcpd", "go.mod"), "module github.com/kemalnw/mcpd\n")
+	writeTestFile(t, filepath.Join(root, "go", "pkg", "mod", "dependency", "go.mod"), "module dependency\n")
+	m, err := NewManager(ManagerOptions{DisableRipgrep: true, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond, PreferredRoots: []string{src}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	start, err := m.Start(context.Background(), Options{RootPath: root, Pattern: "go.mod", SearchType: TypeFiles, IgnoreCase: true, MaxResults: 10, EarlyTermination: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := waitSearchComplete(t, m, start.SessionID)
+	if read.TotalMatches != 1 || len(read.Results) != 1 || read.Results[0].File != filepath.Join(src, "mcpd", "go.mod") {
+		t.Fatalf("preferred root did not beat noisy home dependency: %#v", read.Results)
+	}
+}
+
 func TestRipgrepFilePatternIsIntersectionNotUnion(t *testing.T) {
 	rg, err := exec.LookPath("rg")
 	if err != nil {

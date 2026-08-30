@@ -14,7 +14,7 @@ type SearchTools struct {
 
 func RegisterSearch(server *mcp.Server, manager *searchmgr.Manager, auditStore *audit.Store) {
 	t := &SearchTools{manager: manager}
-	mcp.AddTool(server, tool("start_search", "Search files or file contents", "Use this when a file path is unknown, when locating filenames across a tree, or when searching text across many files. searchType=files searches names; searchType=content searches file contents. The search runs progressively and returns a sessionId; use get_more_search_results with that ID when more results are needed. Prefer list_directory for browsing one known directory and read_file when the exact file is already known.", toolHints{readOnly: true}), audited(auditStore, "start_search", t.start))
+	mcp.AddTool(server, tool("start_search", "Search files or file contents", "Use this when a file path is unknown, when locating filenames across a tree, or when searching text across many files. searchType=files searches names; searchType=content searches file contents. When the user names a project or repository but its exact path is unknown, set pathHint to that project/repository name so MCPD can prioritize likely workspace roots and avoid broad duplicate searches. The search runs progressively and returns a sessionId; use get_more_search_results with that ID when more results are needed. Prefer list_directory for browsing one known directory and read_file when the exact file is already known.", toolHints{readOnly: true}), audited(auditStore, "start_search", t.start))
 	mcp.AddTool(server, tool("get_more_search_results", "Read more search results", "Use this only with a sessionId returned by start_search. Read retained results from that existing search instead of starting a duplicate search. Non-negative offsets are absolute result positions; negative offsets return results from the tail. Continue while hasMoreResults is true and more evidence is needed.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "get_more_search_results", t.read))
 	mcp.AddTool(server, tool("stop_search", "Cancel a search session", "Use this to cancel a running start_search session when its remaining work is no longer needed. Already discovered results remain readable until retention cleanup. Do not call it merely because a search has completed naturally.", toolHints{destructive: true, idempotent: true}), audited(auditStore, "stop_search", t.stop))
 	mcp.AddTool(server, tool("list_searches", "List search sessions", "Use this to discover running or recently completed MCPD search sessions, including their session IDs, patterns, backend, runtime, and result counts. Prefer get_more_search_results when you already know the sessionId you want to continue.", toolHints{readOnly: true, idempotent: true}), audited(auditStore, "list_searches", t.list))
@@ -23,6 +23,7 @@ func RegisterSearch(server *mcp.Server, manager *searchmgr.Manager, auditStore *
 type StartSearchInput struct {
 	Path             string `json:"path" jsonschema:"root directory or file to search"`
 	Pattern          string `json:"pattern" jsonschema:"file-name pattern or content pattern"`
+	PathHint         string `json:"pathHint,omitempty" jsonschema:"optional project or repository name used to prioritize matching workspace paths when path is broad"`
 	SearchType       string `json:"searchType,omitempty" jsonschema:"search mode: files or content; defaults to files"`
 	FilePattern      string `json:"filePattern,omitempty" jsonschema:"optional pipe-separated glob filters such as *.go|*.md"`
 	IgnoreCase       *bool  `json:"ignoreCase,omitempty" jsonschema:"case-insensitive matching; defaults to true"`
@@ -66,7 +67,7 @@ func (t *SearchTools) start(ctx context.Context, in StartSearchInput) (searchmgr
 		early = *in.EarlyTermination
 	}
 	return t.manager.Start(ctx, searchmgr.Options{
-		RootPath: in.Path, Pattern: in.Pattern, SearchType: searchType, FilePattern: in.FilePattern, IgnoreCase: ignoreCase,
+		RootPath: in.Path, Pattern: in.Pattern, SearchType: searchType, FilePattern: in.FilePattern, PathHint: in.PathHint, IgnoreCase: ignoreCase,
 		MaxResults: in.MaxResults, IncludeHidden: in.IncludeHidden, ContextLines: contextLines, TimeoutMS: in.TimeoutMS,
 		EarlyTermination: early, LiteralSearch: in.LiteralSearch,
 	})

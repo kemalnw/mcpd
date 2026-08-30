@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -64,9 +65,11 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		_ = auditStore.Close()
 		return nil, err
 	}
+	workspaceRoots := discoverWorkspaceRoots()
 	searches, err := searchmgr.NewManager(searchmgr.ManagerOptions{
 		DefaultMaxResults: cfg.Search.DefaultMaxResults, Retention: time.Duration(cfg.Search.RetentionSeconds) * time.Second,
-		InitialWait: time.Duration(cfg.Search.InitialWaitMS) * time.Millisecond,
+		InitialWait:    time.Duration(cfg.Search.InitialWaitMS) * time.Millisecond,
+		PreferredRoots: workspaceRoots,
 	})
 	if err != nil {
 		_ = processes.Close()
@@ -97,6 +100,15 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	}
 
 	v := version.Current()
+	instructions := `MCPD operates the connected Linux VM with the permissions of the daemon user.
+Choose the narrowest dedicated tool that directly matches the task; use start_process only when shell execution is actually needed.
+For files: use list_directory to browse a known directory, start_search to discover filenames or content, read_file/read_multiple_files to read known paths, get_file_info for metadata, edit_block for localized edits, and write_file for full rewrites/creation/appends.
+For commands: use start_process once, then continue that PID with read_process_output or interact_with_process. Prefer force_terminate for MCPD-managed PIDs and kill_process only for arbitrary OS processes.
+For searches: continue an existing search with get_more_search_results instead of launching a duplicate search. When the user names a project/repository but its exact path is unknown, pass that name as start_search.pathHint and search a likely workspace root instead of retrying progressively broader roots.
+Read-only inspection should precede mutation when target paths, PIDs, or current state are uncertain. Avoid unnecessary tool calls and batch independent reads when practical.`
+	if len(workspaceRoots) > 0 {
+		instructions += "\nKnown workspace roots on this VM: " + strings.Join(workspaceRoots, ", ") + ". Prefer these for project/repository searches before the entire home directory."
+	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:        "mcpd",
 		Title:       "MCPD",
@@ -106,12 +118,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	}, &mcp.ServerOptions{
 		Logger:       logger,
 		Capabilities: &mcp.ServerCapabilities{},
-		Instructions: `MCPD operates the connected Linux VM with the permissions of the daemon user.
-Choose the narrowest dedicated tool that directly matches the task; use start_process only when shell execution is actually needed.
-For files: use list_directory to browse a known directory, start_search to discover filenames or content, read_file/read_multiple_files to read known paths, get_file_info for metadata, edit_block for localized edits, and write_file for full rewrites/creation/appends.
-For commands: use start_process once, then continue that PID with read_process_output or interact_with_process. Prefer force_terminate for MCPD-managed PIDs and kill_process only for arbitrary OS processes.
-For searches: continue an existing search with get_more_search_results instead of launching a duplicate search. Stop it only when cancellation is useful.
-Read-only inspection should precede mutation when target paths, PIDs, or current state are uncertain. Avoid unnecessary tool calls and batch independent reads when practical.`,
+		Instructions: instructions,
 	})
 	tools.RegisterProcess(server, processes, auditStore)
 	tools.RegisterFilesystem(server, files, auditStore)
@@ -238,6 +245,23 @@ func accessLog(logger *slog.Logger, next http.Handler) http.Handler {
 			"method", r.Method, "path", r.URL.Path, "host", r.Host, "remote", r.RemoteAddr,
 			"status", status, "response_bytes", metrics.bytes, "duration_ms", time.Since(started).Milliseconds())
 	})
+}
+
+func discoverWorkspaceRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return nil
+	}
+	names := []string{"src", "workspace", "work", "projects", "project", "code", "repos", "repositories", "dev", "development"}
+	roots := make([]string, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(home, name)
+		info, err := os.Stat(path)
+		if err == nil && info.IsDir() {
+			roots = append(roots, path)
+		}
+	}
+	return roots
 }
 
 func enforceCanonicalHost(next http.Handler, externalURL string, logger *slog.Logger) (http.Handler, error) {

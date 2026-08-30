@@ -55,7 +55,7 @@ func TestStatelessMCPEndToEnd(t *testing.T) {
 	if init.ServerInfo.Description == "" || init.ServerInfo.WebsiteURL != "https://github.com/kemalnw/mcpd" {
 		t.Fatalf("server metadata = %#v", init.ServerInfo)
 	}
-	if !strings.Contains(init.Instructions, "narrowest dedicated tool") || !strings.Contains(init.Instructions, "continue that PID") {
+	if !strings.Contains(init.Instructions, "narrowest dedicated tool") || !strings.Contains(init.Instructions, "continue that PID") || !strings.Contains(init.Instructions, "pathHint") {
 		t.Fatalf("server instructions missing tool-selection guidance: %q", init.Instructions)
 	}
 	listed, err := session.ListTools(context.Background(), nil)

@@ -14,6 +14,7 @@ type Options struct {
 	Pattern          string
 	SearchType       Type
 	FilePattern      string
+	PathHint         string
 	IgnoreCase       bool
 	MaxResults       int
 	IncludeHidden    bool
@@ -81,4 +82,5 @@ type ManagerOptions struct {
 	InitialWait       time.Duration
 	RipgrepPath       string
 	DisableRipgrep    bool
+	PreferredRoots    []string
 }
