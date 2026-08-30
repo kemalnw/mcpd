@@ -4,7 +4,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
+
+const promptStabilityDelay = 50 * time.Millisecond
 
 var promptPattern = regexp.MustCompile(`(?:>>> |\.\.\. |> |\$ |# |% |mysql> |sqlite> |psql[^\r\n]*[=#] )$`)
 

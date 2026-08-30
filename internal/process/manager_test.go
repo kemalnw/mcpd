@@ -229,7 +229,7 @@ func TestPromptLikeHistoricalOutputDoesNotBlockProcess(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			m := testManager(t)
 			result, err := m.Start(context.Background(), StartRequest{
-				Command: "printf 'build step $ \\nstill running\\n'; sleep 10", TimeoutMS: 500, PTY: mode,
+				Command: "printf 'build step $ '; sleep 0.02; printf '\\nstill running\\n'; sleep 10", TimeoutMS: 500, PTY: mode,
 			})
 			if err != nil {
 				t.Fatal(err)
