@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X github.com/kemalnw/mcpd/internal/version.Commit=$(COMMIT) \
 	-X github.com/kemalnw/mcpd/internal/version.Date=$(DATE)
 
-.PHONY: build test test-race vet fmt fmt-check tidy skills-check conflict-check skill-install check release-package release-test clean
+.PHONY: build test test-race benchmark-test vet fmt fmt-check tidy skills-check conflict-check skill-install check release-package release-test clean
 
 build:
 	@mkdir -p $(OUT_DIR)
@@ -19,6 +19,9 @@ test:
 
 test-race:
 	go test -race ./... -count=1
+
+benchmark-test:
+	./scripts/test-workflow-benchmark.sh
 
 vet:
 	go vet ./...
