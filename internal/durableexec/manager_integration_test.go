@@ -239,3 +239,16 @@ func mustStartKeyDigest(t *testing.T, key string) string {
 	}
 	return digest
 }
+
+func TestNewJobIDUses128BitsAndLegacyIDsRemainValid(t *testing.T) {
+	id, err := newJobID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(id) != 4+32 || !validJobID(id) {
+		t.Fatalf("new job id=%q len=%d", id, len(id))
+	}
+	if !validJobID("job_0123456789abcdefabcd") {
+		t.Fatal("legacy 80-bit durable job id became invalid")
+	}
+}

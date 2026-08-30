@@ -134,6 +134,8 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 	if len(workspaceRoots) > 0 {
 		instructions += "\nKnown workspace roots on this VM: " + strings.Join(workspaceRoots, ", ") + ". Prefer these for project/repository searches before the entire home directory."
 	}
+	serverCapabilities := &mcp.ServerCapabilities{}
+	serverCapabilities.AddExtension(tools.TasksExtensionID, nil)
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:        "mcpd",
 		Title:       "MCPD",
@@ -142,7 +144,7 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 		WebsiteURL:  "https://github.com/kemalnw/mcpd",
 	}, &mcp.ServerOptions{
 		Logger:       logger,
-		Capabilities: &mcp.ServerCapabilities{},
+		Capabilities: serverCapabilities,
 		Instructions: instructions,
 	})
 	tools.RegisterProcess(server, processes, auditStore)
@@ -150,6 +152,9 @@ Read-only inspection should precede mutation when target paths, PIDs, or current
 	tools.RegisterSearch(server, searches, auditStore)
 	tools.RegisterWorkflow(server, workflowStore, auditStore, time.Duration(cfg.Workflow.CheckpointIntervalSeconds)*time.Second, time.Duration(cfg.Workflow.CompletedRetentionSeconds)*time.Second, cfg.Workflow.GarbageCollectMaxDeletes)
 	tools.RegisterDurable(server, durableManager, auditStore)
+	if err := tools.RegisterTasksExtension(server, durableManager); err != nil {
+		return nil, fmt.Errorf("register MCP Tasks extension: %w", err)
+	}
 
 	streamableOpts := &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger,
