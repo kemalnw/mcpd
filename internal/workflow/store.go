@@ -248,8 +248,9 @@ type keyedRWLockEntry struct {
 }
 
 type keyedRWLockTable struct {
-	mu      sync.Mutex
-	entries map[string]*keyedRWLockEntry
+	mu         sync.Mutex
+	entries    map[string]*keyedRWLockEntry
+	violations int
 }
 
 func newKeyedRWLockTable() *keyedRWLockTable {
@@ -268,14 +269,28 @@ func (t *keyedRWLockTable) Acquire(key string) (*sync.RWMutex, func()) {
 	}
 	entry.refs++
 	t.mu.Unlock()
+	released := false
 	return &entry.lock, func() {
 		t.mu.Lock()
+		defer t.mu.Unlock()
+		if released {
+			// Keep release idempotent in production so an internal bookkeeping bug
+			// cannot corrupt the live lock table. Tests assert violations remain zero.
+			t.violations++
+			return
+		}
+		released = true
 		entry.refs--
 		if entry.refs == 0 && t.entries[key] == entry {
 			delete(t.entries, key)
 		}
-		t.mu.Unlock()
 	}
+}
+
+func (t *keyedRWLockTable) InvariantViolations() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.violations
 }
 
 func (t *keyedRWLockTable) Len() int {
