@@ -316,14 +316,65 @@ func TestCompletedSessionRetention(t *testing.T) {
 
 func TestReadOutputObservesPartialLineGeneration(t *testing.T) {
 	m := testManager(t)
-	result, err := m.Start(context.Background(), StartRequest{
-		Command: "printf 'phase1'; sleep 0.4; printf ' phase2'; sleep 10", TimeoutMS: 150, PTY: PTYNever,
-	})
-	if err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type startOutcome struct {
+		result StartResult
+		err    error
 	}
+	started := make(chan startOutcome, 1)
+	go func() {
+		result, err := m.Start(ctx, StartRequest{
+			Command: "printf 'phase1'; read value; printf ' phase2'; sleep 10", TimeoutMS: 5000, PTY: PTYNever,
+		})
+		started <- startOutcome{result: result, err: err}
+	}()
+
+	// Synchronize on MCPD having actually captured the first partial generation.
+	// A fixed sleep/timeout is not sufficient under race instrumentation: the
+	// shell can write before the capture goroutine is scheduled.
+	var session *session
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.RLock()
+		for _, candidate := range m.sessions {
+			session = candidate
+			break
+		}
+		m.mu.RUnlock()
+		if session != nil {
+			session.mu.Lock()
+			captured := session.outputGeneration > 0 && session.partial == "phase1"
+			session.mu.Unlock()
+			if captured {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if session == nil {
+		t.Fatal("managed session was not created")
+	}
+	session.mu.Lock()
+	captured := session.outputGeneration > 0 && session.partial == "phase1"
+	session.mu.Unlock()
+	if !captured {
+		t.Fatal("initial partial generation was not captured before deadline")
+	}
+
+	// End only the tool-call wait. The managed process intentionally survives so
+	// a later stdin write can update the same partial line without a newline.
+	cancel()
+	outcome := <-started
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	result := outcome.result
 	if strings.Join(result.Output, "") != "phase1" {
 		t.Fatalf("unexpected initial partial output: %+v", result)
+	}
+	if _, err := m.Interact(context.Background(), InteractRequest{PID: result.PID, Input: "ok", WaitForPrompt: false, TimeoutMS: 1000}); err != nil {
+		t.Fatal(err)
 	}
 	update, err := m.ReadOutput(context.Background(), OutputRequest{PID: result.PID, Offset: 0, Length: 10, TimeoutMS: 1000})
 	if err != nil {
