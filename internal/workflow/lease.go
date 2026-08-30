@@ -21,12 +21,13 @@ const (
 )
 
 type Lease struct {
-	Kind       LeaseKind `json:"kind"`
-	Resource   string    `json:"resource"`
-	OwnerRunID string    `json:"owner_run_id"`
-	OwnerJobID string    `json:"owner_job_id,omitempty"`
-	AcquiredAt time.Time `json:"acquired_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	Kind         LeaseKind `json:"kind"`
+	Resource     string    `json:"resource"`
+	OwnerRunID   string    `json:"owner_run_id"`
+	OwnerJobID   string    `json:"owner_job_id,omitempty"`
+	FencingToken uint64    `json:"fencing_token"`
+	AcquiredAt   time.Time `json:"acquired_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 type LeaseRequest struct {
@@ -38,8 +39,9 @@ type LeaseRequest struct {
 }
 
 type leaseFile struct {
-	SchemaVersion int     `json:"schema_version"`
-	Leases        []Lease `json:"leases"`
+	SchemaVersion    int     `json:"schema_version"`
+	NextFencingToken uint64  `json:"next_fencing_token"`
+	Leases           []Lease `json:"leases"`
 }
 
 var ErrLeaseConflict = errors.New("resource lease conflict")
@@ -80,7 +82,11 @@ func (s *Store) AcquireLease(req LeaseRequest) (Lease, error) {
 		}
 		return Lease{}, fmt.Errorf("%w: %s %q is held by run %s job %s until %s", ErrLeaseConflict, existing.Kind, existing.Resource, existing.OwnerRunID, existing.OwnerJobID, existing.ExpiresAt.Format(time.RFC3339))
 	}
-	lease := Lease{Kind: req.Kind, Resource: resource, OwnerRunID: req.OwnerRunID, OwnerJobID: req.OwnerJobID, AcquiredAt: now, ExpiresAt: now.Add(req.TTL)}
+	state.NextFencingToken++
+	if state.NextFencingToken == 0 {
+		return Lease{}, errors.New("lease fencing token exhausted")
+	}
+	lease := Lease{Kind: req.Kind, Resource: resource, OwnerRunID: req.OwnerRunID, OwnerJobID: req.OwnerJobID, FencingToken: state.NextFencingToken, AcquiredAt: now, ExpiresAt: now.Add(req.TTL)}
 	state.Leases = append(state.Leases, lease)
 	sortLeases(state.Leases)
 	if err := s.writeLeasesLocked(state); err != nil {
@@ -158,18 +164,108 @@ func normalizeLeaseResource(kind LeaseKind, resource string) (string, error) {
 		}
 		return resource, nil
 	case LeasePath:
-		abs, err := filepath.Abs(resource)
-		if err != nil {
-			return "", fmt.Errorf("resolve lease path: %w", err)
-		}
-		abs = filepath.Clean(abs)
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = filepath.Clean(resolved)
-		}
-		return abs, nil
+		return canonicalLeasePath(resource)
 	default:
 		return "", errors.New("lease kind must be named or path")
 	}
+}
+
+func canonicalLeasePath(resource string) (string, error) {
+	abs, err := filepath.Abs(resource)
+	if err != nil {
+		return "", fmt.Errorf("resolve lease path: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	probe := abs
+	suffix := make([]string, 0, 4)
+	for {
+		resolved, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return abs, nil
+		}
+		suffix = append(suffix, filepath.Base(probe))
+		probe = parent
+	}
+}
+
+type LeaseClaim struct {
+	Kind         LeaseKind
+	Resource     string
+	OwnerRunID   string
+	OwnerJobID   string
+	FencingToken uint64
+}
+
+func (s *Store) RenewLease(claim LeaseClaim, ttl time.Duration) (Lease, error) {
+	if ttl <= 0 || ttl > 24*time.Hour {
+		return Lease{}, errors.New("lease TTL must be > 0 and <= 24h")
+	}
+	normalized, err := normalizeLeaseResource(claim.Kind, claim.Resource)
+	if err != nil {
+		return Lease{}, err
+	}
+	if err := validateHandle("owner_run_id", claim.OwnerRunID); err != nil {
+		return Lease{}, err
+	}
+	if claim.OwnerJobID != "" {
+		if err := validateHandle("owner_job_id", claim.OwnerJobID); err != nil {
+			return Lease{}, err
+		}
+	}
+	if claim.FencingToken == 0 {
+		return Lease{}, errors.New("fencing token is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.readLeasesLocked()
+	if err != nil {
+		return Lease{}, err
+	}
+	now := s.now()
+	state.Leases = activeLeases(state.Leases, now)
+	for i := range state.Leases {
+		lease := &state.Leases[i]
+		if lease.Kind == claim.Kind && lease.Resource == normalized && lease.OwnerRunID == claim.OwnerRunID && lease.OwnerJobID == claim.OwnerJobID && lease.FencingToken == claim.FencingToken {
+			lease.ExpiresAt = now.Add(ttl)
+			if err := s.writeLeasesLocked(state); err != nil {
+				return Lease{}, err
+			}
+			return *lease, nil
+		}
+	}
+	return Lease{}, fmt.Errorf("%w: lease claim is stale or no longer active", ErrLeaseConflict)
+}
+
+func (s *Store) ValidateLease(claim LeaseClaim) error {
+	normalized, err := normalizeLeaseResource(claim.Kind, claim.Resource)
+	if err != nil {
+		return err
+	}
+	if claim.FencingToken == 0 {
+		return errors.New("fencing token is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.readLeasesLocked()
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	active := activeLeases(state.Leases, now)
+	for _, lease := range active {
+		if lease.Kind == claim.Kind && lease.Resource == normalized && lease.OwnerRunID == claim.OwnerRunID && lease.OwnerJobID == claim.OwnerJobID && lease.FencingToken == claim.FencingToken {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: stale fencing token or inactive lease", ErrLeaseConflict)
 }
 
 func leasesConflict(a, b Lease) bool {
