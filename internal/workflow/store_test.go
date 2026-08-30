@@ -350,3 +350,46 @@ func TestConcurrentAppendTailAndUnrelatedCheckpoint(t *testing.T) {
 		t.Fatalf("concurrent log tail corrupted: len=%d tail=%v", len(tail), tail)
 	}
 }
+
+func TestKeyedLockDoubleReleaseIsSafeAndObservable(t *testing.T) {
+	table := newKeyedRWLockTable()
+	lock, release := table.Acquire("x")
+	lock.Lock()
+	lock.Unlock()
+	release()
+	release()
+	if got := table.Len(); got != 0 {
+		t.Fatalf("double release leaked lock entry: %d", got)
+	}
+	if got := table.InvariantViolations(); got != 1 {
+		t.Fatalf("double release violations=%d want 1", got)
+	}
+}
+
+func TestStoreJobLogOperationsBalanceKeyedLockPins(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.Create(CreateRequest{Title: "run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		if err := store.AppendJobLog(run.ID, "job", []byte("line\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.ReadJobLogTail(run.ID, "job", 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := store.runLocks.InvariantViolations(); got != 0 {
+		t.Fatalf("run-lock invariant violations=%d", got)
+	}
+	if got := store.logLocks.InvariantViolations(); got != 0 {
+		t.Fatalf("log-lock invariant violations=%d", got)
+	}
+	if store.runLocks.Len() != 0 || store.logLocks.Len() != 0 {
+		t.Fatalf("keyed locks leaked: run=%d log=%d", store.runLocks.Len(), store.logLocks.Len())
+	}
+}
