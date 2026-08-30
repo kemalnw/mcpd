@@ -38,7 +38,7 @@ func TestAuditedLogsStartProcessAndCorrelatesAuditEvent(t *testing.T) {
 		t.Fatalf("log entry count = %d, want 2: %s", len(entries), logs.String())
 	}
 	call, result := entries[0], entries[1]
-	if call["msg"] != "mcp tool call" || call["tool"] != "start_process" || call["command"] != "df -h" || call["cwd"] != "/srv/app" {
+	if call["msg"] != "mcp tool call" || call["tool"] != "start_process" || call["command_sha256"] != auditDigest("df -h") || call["command_bytes"] != float64(len("df -h")) || call["cwd"] != "/srv/app" {
 		t.Fatalf("unexpected call log: %#v", call)
 	}
 	if result["msg"] != "mcp tool result" || result["status"] != "success" || result["pid"] != float64(4242) || result["cwd"] != "/srv/app" || result["process_state"] != "exited" || result["exit_code"] != float64(0) {
@@ -50,6 +50,13 @@ func TestAuditedLogsStartProcessAndCorrelatesAuditEvent(t *testing.T) {
 	recent := store.Recent(1)
 	if len(recent) != 1 || recent[0].ID != call["event_id"] || recent[0].Tool != "start_process" {
 		t.Fatalf("audit event does not correlate with runtime log: %#v", recent)
+	}
+	encodedAudit, err := json.Marshal(recent[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedAudit), "df -h") {
+		t.Fatalf("raw command leaked into durable audit: %s", encodedAudit)
 	}
 }
 
@@ -66,7 +73,7 @@ func TestAuditedLogsErrors(t *testing.T) {
 	}
 
 	entries := decodeLogEntries(t, logs.String())
-	if len(entries) != 2 || entries[1]["status"] != "error" || entries[1]["error"] != "permission denied" || entries[1]["tool"] != "kill_process" {
+	if len(entries) != 2 || entries[1]["status"] != "error" || entries[1]["error_sha256"] != auditDigest("permission denied") || entries[1]["tool"] != "kill_process" {
 		t.Fatalf("unexpected error logs: %#v", entries)
 	}
 }
@@ -101,24 +108,39 @@ func TestOperationalLogsIncludeCompactSearchMetadata(t *testing.T) {
 		t.Fatalf("log entry count = %d, want 1", len(entries))
 	}
 	entry := entries[0]
-	if entry["tool"] != "start_search" || entry["path"] != "/srv/app" || entry["pattern"] != "TODO" || entry["search_type"] != "content" || entry["file_pattern"] != "*.go" {
+	if entry["tool"] != "start_search" || entry["path"] != "/srv/app" || entry["pattern_bytes"] != float64(len("TODO")) || entry["pattern_sha256"] != auditDigest("TODO") || entry["search_type"] != "content" || entry["file_pattern"] != "*.go" {
 		t.Fatalf("unexpected search activity log: %#v", entry)
+	}
+	if _, leaked := entry["pattern"]; leaked {
+		t.Fatalf("raw search pattern leaked: %#v", entry)
 	}
 }
 
-func TestStartProcessCommandIsTruncatedExplicitly(t *testing.T) {
+func TestStartProcessCommandIsHashedNotLogged(t *testing.T) {
 	var logs bytes.Buffer
 	withActivityTestLogger(t, &logs)
 
-	command := strings.Repeat("x", maxCommandLogBytes+50)
-	logToolCall(context.Background(), "evt_long", "start_process", StartProcessInput{Command: command, TimeoutMS: 1})
+	command := "curl -H 'Authorization: Bearer super-secret-token' https://example.test"
+	logToolCall(context.Background(), "evt_secret", "start_process", StartProcessInput{Command: command, TimeoutMS: 1})
 	entries := decodeLogEntries(t, logs.String())
-	if len(entries) != 1 || entries[0]["command_truncated"] != true {
-		t.Fatalf("long command was not marked truncated: %#v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%#v", entries)
 	}
-	logged, _ := entries[0]["command"].(string)
-	if len(logged) >= len(command) || !strings.HasSuffix(logged, " [truncated]") {
-		t.Fatalf("command was not truncated as expected: len=%d", len(logged))
+	entry := entries[0]
+	if entry["command_sha256"] != auditDigest(command) || entry["command_bytes"] != float64(len(command)) {
+		t.Fatalf("command metadata missing: %#v", entry)
+	}
+	if strings.Contains(logs.String(), "super-secret-token") || strings.Contains(logs.String(), command) {
+		t.Fatalf("raw command/secret leaked into runtime activity log: %s", logs.String())
+	}
+}
+
+func TestRemoteReadLogStripsURLCredentialsAndQuery(t *testing.T) {
+	var logs bytes.Buffer
+	withActivityTestLogger(t, &logs)
+	logToolCall(context.Background(), "evt_url", "read_file", ReadFileInput{Path: "https://user:pass@example.test/x?token=secret#fragment", IsURL: true})
+	if raw := logs.String(); strings.Contains(raw, "pass") || strings.Contains(raw, "token=secret") || strings.Contains(raw, "fragment") {
+		t.Fatalf("URL credentials/query leaked: %s", raw)
 	}
 }
 
