@@ -7,6 +7,9 @@ const (
 
 var toolScopes = map[string]string{
 	"start_process":           ScopeWrite,
+	"start_process_batch":     ScopeWrite,
+	"read_process_batch":      ScopeRead,
+	"cancel_process_batch":    ScopeWrite,
 	"read_process_output":     ScopeRead,
 	"interact_with_process":   ScopeWrite,
 	"resize_process_pty":      ScopeWrite,

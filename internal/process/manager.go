@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -25,6 +26,7 @@ type Options struct {
 	OutputBufferBytes  int
 	MaxLineBytes       int
 	CompletedSessions  int
+	BatchMaxParallel   int
 }
 
 type Manager struct {
@@ -32,6 +34,10 @@ type Manager struct {
 	sessions  map[int]*session
 	completed []int
 	opts      Options
+
+	batchMu          sync.Mutex
+	batches          map[string]*processBatch
+	completedBatches []string
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -41,20 +47,16 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.InitialOutputLines == 0 {
 		opts.InitialOutputLines = defaultInitialOutputLines
 	}
-	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 {
+	if opts.BatchMaxParallel == 0 {
+		opts.BatchMaxParallel = 4
+	}
+	if opts.InitialOutputLines < 0 || opts.OutputBufferBytes <= 0 || opts.MaxLineBytes <= 0 || opts.CompletedSessions < 0 || opts.BatchMaxParallel <= 0 {
 		return nil, errors.New("invalid process manager limits")
 	}
-	return &Manager{sessions: make(map[int]*session), opts: opts}, nil
+	return &Manager{sessions: make(map[int]*session), batches: make(map[string]*processBatch), opts: opts}, nil
 }
 
 func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, error) {
-	if req.Command == "" {
-		return StartResult{}, errors.New("command is required")
-	}
-	shell := req.Shell
-	if shell == "" {
-		shell = m.opts.DefaultShell
-	}
 	waitMS := req.TimeoutMS
 	if waitMS == 0 {
 		waitMS = m.opts.DefaultWaitMS
@@ -62,25 +64,10 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	if waitMS < 0 {
 		return StartResult{}, errors.New("timeout_ms must be >= 0")
 	}
-	usePTY, err := resolvePTY(req.PTY, req.Command)
+	s, err := m.startSession(req.Command, req.CWD, req.Shell, req.PTY, req.SeparateStreams)
 	if err != nil {
 		return StartResult{}, err
 	}
-	cwd, err := resolveCWD(req.CWD)
-	if err != nil {
-		return StartResult{}, err
-	}
-
-	cmd := exec.Command(shell, "-l", "-c", req.Command)
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-
-	s, err := m.startCommand(cmd, req.Command, cwd, shell, usePTY, req.SeparateStreams)
-	if err != nil {
-		return StartResult{}, err
-	}
-	m.addSession(s)
-	logProcessStarted(s.snapshot())
 
 	started := time.Now()
 	m.waitForStart(ctx, s, time.Duration(waitMS)*time.Millisecond)
@@ -93,12 +80,39 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 		TotalLines: page.TotalLines, Remaining: page.Remaining, EvictedLines: page.EvictedLines,
 		WaitedMS: time.Since(started).Milliseconds(), WaitingForInput: info.WaitingForInput,
 	}
-	if req.SeparateStreams && !usePTY {
+	if req.SeparateStreams && !info.PTY {
 		result.Streams = page.Streams
 	} else {
 		result.Output = page.Lines
 	}
 	return result, nil
+}
+
+func (m *Manager) startSession(command, cwd, shell string, ptyMode PTYMode, separateStreams bool) (*session, error) {
+	if strings.TrimSpace(command) == "" {
+		return nil, errors.New("command is required")
+	}
+	if shell == "" {
+		shell = m.opts.DefaultShell
+	}
+	usePTY, err := resolvePTY(ptyMode, command)
+	if err != nil {
+		return nil, err
+	}
+	resolvedCWD, err := resolveCWD(cwd)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(shell, "-l", "-c", command)
+	cmd.Dir = resolvedCWD
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	s, err := m.startCommand(cmd, command, resolvedCWD, shell, usePTY, separateStreams)
+	if err != nil {
+		return nil, err
+	}
+	m.addSession(s)
+	logProcessStarted(s.snapshot())
+	return s, nil
 }
 
 func resolveCWD(cwd string) (string, error) {

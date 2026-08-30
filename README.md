@@ -75,6 +75,9 @@ sessions.
 | Tool | Status | Notes |
 | --- | --- | --- |
 | `start_process` | ✅ | wait timeout does not kill long-running processes; PTY `auto/always/never`; optional stdout/stderr separation |
+| `start_process_batch` | ✅ | schedule 2+ independent non-interactive jobs with bounded parallelism |
+| `read_process_batch` | ✅ | wait-for-any-change and changed-only output deltas |
+| `cancel_process_batch` | ✅ | cancel queued/running batch jobs safely |
 | `read_process_output` | ✅ | cursor/absolute/tail pagination plus same-line output generations |
 | `interact_with_process` | ✅ | interactive stdin with prompt-aware waiting; optional raw input |
 | `resize_process_pty` | ✅ | resize running PTY rows/columns |

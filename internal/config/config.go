@@ -21,6 +21,7 @@ const (
 	defaultOutputBufferBytes   = 50 << 20
 	defaultMaxLineBytes        = 1 << 20
 	defaultCompletedSessions   = 100
+	defaultBatchMaxParallel    = 4
 	defaultFileReadLines       = 1000
 	defaultNestedEntries       = 100
 	defaultHTTPTimeoutSecs     = 15
@@ -49,6 +50,7 @@ type ProcessConfig struct {
 	OutputBufferBytes  int    `toml:"output_buffer_bytes"`
 	MaxLineBytes       int    `toml:"max_line_bytes"`
 	CompletedSessions  int    `toml:"completed_sessions"`
+	BatchMaxParallel   int    `toml:"batch_max_parallel"`
 }
 
 type FilesConfig struct {
@@ -85,7 +87,7 @@ func Default() Config {
 	stateDir := DefaultStateDir()
 	return Config{
 		Server:  ServerConfig{Listen: defaultListen, MCPPath: defaultMCPPath, ShutdownSeconds: 10},
-		Process: ProcessConfig{DefaultShell: defaultShell, DefaultWaitMS: defaultWaitTimeoutMS, InitialOutputLines: defaultInitialOutputLines, OutputBufferBytes: defaultOutputBufferBytes, MaxLineBytes: defaultMaxLineBytes, CompletedSessions: defaultCompletedSessions},
+		Process: ProcessConfig{DefaultShell: defaultShell, DefaultWaitMS: defaultWaitTimeoutMS, InitialOutputLines: defaultInitialOutputLines, OutputBufferBytes: defaultOutputBufferBytes, MaxLineBytes: defaultMaxLineBytes, CompletedSessions: defaultCompletedSessions, BatchMaxParallel: defaultBatchMaxParallel},
 		Files:   FilesConfig{DefaultReadLines: defaultFileReadLines, MaxLineBytes: defaultMaxLineBytes, NestedEntryLimit: defaultNestedEntries, HTTPTimeoutSeconds: defaultHTTPTimeoutSecs, MaxRemoteBytes: defaultMaxRemoteBytes},
 		Search:  SearchConfig{DefaultMaxResults: 1000, RetentionSeconds: 300, InitialWaitMS: 40},
 		Audit:   AuditConfig{Enabled: true, Path: defaultAuditPath()},
@@ -147,7 +149,7 @@ func (c Config) Validate() error {
 	if c.Process.DefaultShell == "" {
 		return errors.New("process.default_shell must not be empty")
 	}
-	if c.Process.DefaultWaitMS < 0 || c.Process.InitialOutputLines <= 0 || c.Process.OutputBufferBytes <= 0 || c.Process.MaxLineBytes <= 0 || c.Process.CompletedSessions < 0 {
+	if c.Process.DefaultWaitMS < 0 || c.Process.InitialOutputLines <= 0 || c.Process.OutputBufferBytes <= 0 || c.Process.MaxLineBytes <= 0 || c.Process.CompletedSessions < 0 || c.Process.BatchMaxParallel <= 0 {
 		return errors.New("process limits contain invalid values")
 	}
 	if c.Files.DefaultReadLines <= 0 || c.Files.MaxLineBytes <= 0 || c.Files.NestedEntryLimit <= 0 || c.Files.HTTPTimeoutSeconds <= 0 || c.Files.MaxRemoteBytes <= 0 {

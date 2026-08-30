@@ -53,6 +53,16 @@ func toolInputAttrs(in any) []slog.Attr {
 		attrs = appendLogString(attrs, "pty_mode", v.PTY, maxMetadataLogBytes)
 		attrs = append(attrs, slog.Bool("separate_streams", v.SeparateStreams))
 		return attrs
+	case StartProcessBatchInput:
+		return []slog.Attr{slog.Int("job_count", len(v.Jobs)), slog.Int("max_parallel", v.MaxParallel), slog.Int("initial_wait_ms", v.InitialWaitMS)}
+	case ReadProcessBatchInput:
+		attrs := []slog.Attr{slog.Int("timeout_ms", v.TimeoutMS), slog.Int("length", v.Length)}
+		if v.OnlyChanged != nil {
+			attrs = append(attrs, slog.Bool("only_changed", *v.OnlyChanged))
+		}
+		return appendLogString(attrs, "batch_id", v.BatchID, maxMetadataLogBytes)
+	case BatchIDInput:
+		return appendLogString(nil, "batch_id", v.BatchID, maxMetadataLogBytes)
 	case ReadProcessOutputInput:
 		return []slog.Attr{slog.Int("pid", v.PID), slog.Int("timeout_ms", v.TimeoutMS), slog.Int("offset", v.Offset), slog.Int("length", v.Length)}
 	case InteractWithProcessInput:
@@ -129,6 +139,10 @@ func toolOutputAttrs(out any) []slog.Attr {
 		attrs = appendLogString(attrs, "cwd", v.CWD, maxMetadataLogBytes)
 		attrs = appendLogString(attrs, "shell", v.Shell, maxMetadataLogBytes)
 		return appendExitCode(attrs, v.ExitCode)
+	case processmgr.BatchResult:
+		return []slog.Attr{slog.String("batch_id", v.BatchID), slog.String("batch_state", string(v.State)), slog.Uint64("generation", v.Generation), slog.Int("job_count", len(v.Jobs)), slog.Int("queued", v.Counts.Queued), slog.Int("running", v.Counts.Running), slog.Int("completed", v.Counts.Completed), slog.Int("failed", v.Counts.Failed), slog.Int("canceled", v.Counts.Canceled)}
+	case processmgr.BatchCancelResult:
+		return []slog.Attr{slog.String("batch_id", v.BatchID), slog.String("batch_state", string(v.State)), slog.Int("canceled", v.Canceled)}
 	case processmgr.OutputResult:
 		attrs := []slog.Attr{slog.Int("pid", v.PID), slog.String("process_state", string(v.State)), slog.Int64("runtime_ms", v.RuntimeMS), slog.Bool("waiting_for_input", v.WaitingForInput)}
 		return appendExitCode(attrs, v.ExitCode)
