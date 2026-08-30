@@ -16,6 +16,8 @@ max_line_bytes = 1048576
 completed_sessions = 100
 # Hard ceiling for concurrently running jobs inside one process batch.
 batch_max_parallel = 4
+# Global weighted concurrency across batches. 0 chooses a CPU/memory-aware host default.
+batch_global_parallel = 0
 
 [files]
 default_read_lines = 1000

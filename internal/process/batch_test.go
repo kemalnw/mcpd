@@ -273,6 +273,10 @@ func TestBatchCursorCanBeConsumedIndependentlyByTwoClients(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "release"), []byte("go"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Freeze batch state before comparing two reads from the same cursor. A
+	// caller-owned cursor is a point-in-time observation token; reads made while
+	// the batch is still changing may legitimately observe different later data.
+	waitForBatchState(t, m, start.BatchID, func(r BatchResult) bool { return r.State == BatchCompleted })
 
 	a, err := m.ReadBatch(context.Background(), BatchReadRequest{BatchID: start.BatchID, OnlyChanged: true, Cursor: cursorA, Length: 100, TimeoutMS: 1000})
 	if err != nil {

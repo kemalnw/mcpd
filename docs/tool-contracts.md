@@ -110,7 +110,9 @@ Semantics:
 
 ### `start_process_batch`, `read_process_batch`, `cancel_process_batch`
 
-Use batches for two or more independent, non-interactive commands. `start_process_batch` accepts stable per-batch job IDs plus the same command/cwd/shell and non-interactive output options as `start_process`. `max_parallel` is capped by `process.batch_max_parallel` (default 4); excess jobs remain queued until a slot is available. `PTY=always` is rejected because interactive terminal control remains an individual-session concern.
+Use batches for two or more independent, non-interactive commands. `start_process_batch` accepts stable per-batch job IDs plus the same command/cwd/shell and non-interactive output options as `start_process`. `max_parallel` is capped by `process.batch_max_parallel` (default 4); excess jobs remain queued until a slot is available. `PTY=always` is rejected because interactive terminal control remains an individual-session concern. Jobs may optionally declare `resource_class` as `normal`, `io`, `cpu`, or `heavy`. MCPD applies a global weighted concurrency limiter across all batches so CPU/heavy jobs consume more capacity than lightweight I/O work. `process.batch_global_parallel = 0` chooses a CPU/memory-aware host default; an explicit positive value is a hard global capacity.
+
+Each batch response includes lightweight host CPU/load/available-memory telemetry plus the effective global capacity. Telemetry influences only deterministic scheduling weights; if memory telemetry is unavailable MCPD falls back to CPU/static limits rather than failing execution.
 
 `read_process_batch` defaults to changed-only polling. It waits until any batch job changes state/output (or timeout), then returns only changed jobs and bounded output deltas. Batch output cursors are independent from `read_process_output`, so a caller can later inspect a job PID from its beginning without batch polling having consumed the per-process cursor.
 

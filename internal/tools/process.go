@@ -50,6 +50,7 @@ type BatchProcessJobInput struct {
 	PTY             string   `json:"pty,omitempty" jsonschema:"PTY mode auto or never; interactive PTY=always jobs must use start_process"`
 	SeparateStreams bool     `json:"separate_streams,omitempty" jsonschema:"for non-PTY jobs, preserve stdout/stderr identity"`
 	DependsOn       []string `json:"depends_on,omitempty" jsonschema:"job ids that must complete successfully before this job becomes ready"`
+	ResourceClass   string   `json:"resource_class,omitempty" jsonschema:"normal, io, cpu, or heavy; heavier jobs consume more global concurrency capacity"`
 }
 
 type StartProcessBatchInput struct {
@@ -120,7 +121,7 @@ func (t *ProcessTools) start(ctx context.Context, in StartProcessInput) (process
 func (t *ProcessTools) startBatch(ctx context.Context, in StartProcessBatchInput) (processmgr.BatchResult, error) {
 	jobs := make([]processmgr.BatchJobRequest, 0, len(in.Jobs))
 	for _, job := range in.Jobs {
-		jobs = append(jobs, processmgr.BatchJobRequest{ID: job.ID, Command: job.Command, CWD: job.CWD, Shell: job.Shell, PTY: processmgr.PTYMode(job.PTY), SeparateStreams: job.SeparateStreams, DependsOn: job.DependsOn})
+		jobs = append(jobs, processmgr.BatchJobRequest{ID: job.ID, Command: job.Command, CWD: job.CWD, Shell: job.Shell, PTY: processmgr.PTYMode(job.PTY), SeparateStreams: job.SeparateStreams, DependsOn: job.DependsOn, ResourceClass: processmgr.ResourceClass(job.ResourceClass)})
 	}
 	return t.manager.StartBatch(ctx, processmgr.BatchStartRequest{Jobs: jobs, MaxParallel: in.MaxParallel, InitialWaitMS: in.InitialWaitMS})
 }

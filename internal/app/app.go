@@ -55,7 +55,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	processes, err := processmgr.NewManager(processmgr.Options{
 		DefaultShell: cfg.Process.DefaultShell, DefaultWaitMS: cfg.Process.DefaultWaitMS,
 		InitialOutputLines: cfg.Process.InitialOutputLines, OutputBufferBytes: cfg.Process.OutputBufferBytes,
-		MaxLineBytes: cfg.Process.MaxLineBytes, CompletedSessions: cfg.Process.CompletedSessions, BatchMaxParallel: cfg.Process.BatchMaxParallel,
+		MaxLineBytes: cfg.Process.MaxLineBytes, CompletedSessions: cfg.Process.CompletedSessions, BatchMaxParallel: cfg.Process.BatchMaxParallel, BatchGlobalParallel: cfg.Process.BatchGlobalParallel,
 	})
 	if err != nil {
 		_ = auditStore.Close()
