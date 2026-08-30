@@ -107,7 +107,7 @@ func (s *session) feed(data []byte, stream string) {
 	s.enforceLimitLocked()
 	s.signalLocked()
 	if promptCandidate {
-		time.AfterFunc(promptStabilityDelay, func() { s.confirmPrompt(generation) })
+		time.AfterFunc(promptStabilityDelayFor(s.command), func() { s.confirmPrompt(generation) })
 	}
 }
 
