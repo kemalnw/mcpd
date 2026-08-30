@@ -102,3 +102,7 @@ A restarted service and a correct binary version do **not** prove that an alread
 `verify-live-schema.sh` performs a fresh HTTP `GET /healthz` and a fresh MCP `tools/list`, then checks that the expected tool input field is present. Set `MCPD_EXPECT_VERSION=vX.Y.Z` when the live binary version must also match exactly, and `MCPD_MCP_PATH=/custom-path` for a non-default MCP endpoint.
 
 If the fresh live check passes but ChatGPT or another already-connected client still exposes the old schema, reconnect/reload that MCP connection so the client performs a new `tools/list`. Do not restart the daemon repeatedly: the remaining problem is client-side metadata caching, not the running server. This distinction should be part of every schema-changing release verification.
+
+### Conflict-marker gate
+
+`make check` and `make release-test` scan model/source/config/docs/scripts/skills text for unresolved Git conflict markers. A rebase is not considered resolved merely because Git accepts `git add`; the repository gate must also pass before a PR/release.

@@ -20,6 +20,17 @@ sh -n "$ROOT/scripts/install.sh"
 sh -n "$ROOT/scripts/verify-live-schema.sh"
 sh -n "$ROOT/scripts/test-schema-smoke.sh"
 PYTHONPYCACHEPREFIX="$TMP/pycache" python3 -m py_compile "$ROOT/scripts/catalog-contract.py"
+PYTHONPYCACHEPREFIX="$TMP/pycache" python3 -m py_compile "$ROOT/scripts/check-conflict-markers.py"
+"$ROOT/scripts/check-conflict-markers.py" "$ROOT" >/dev/null
+mkdir -p "$TMP/conflict-fixture"
+python3 - "$TMP/conflict-fixture/bad.go" <<'PY_CONFLICT'
+import sys
+open(sys.argv[1], 'w', encoding='utf-8').write('<'*7 + ' HEAD\npackage bad\n')
+PY_CONFLICT
+if "$ROOT/scripts/check-conflict-markers.py" "$TMP/conflict-fixture" >/dev/null 2>&1; then
+  echo "conflict-marker checker accepted a synthetic unresolved marker" >&2
+  exit 1
+fi
 sh -n "$ROOT/scripts/install-skill.sh"
 "$ROOT/scripts/validate-skills.py"
 SKILL_DEST="$TMP/skills"
