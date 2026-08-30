@@ -119,18 +119,23 @@ func (m *Manager) runNativeContent(ctx context.Context, s *session) (bool, error
 
 var errStopSearch = errors.New("search complete")
 
+type contentMatch struct {
+	Text      string
+	StartByte int
+	EndByte   int
+}
+
 type contentMatcher struct {
-	literal    string
-	ignoreCase bool
-	re         *regexp.Regexp
+	literal string
+	re      *regexp.Regexp
 }
 
 func newContentMatcher(pattern string, literal, ignoreCase bool) (contentMatcher, error) {
+	if literal && !ignoreCase {
+		return contentMatcher{literal: pattern}, nil
+	}
 	if literal {
-		if ignoreCase {
-			pattern = strings.ToLower(pattern)
-		}
-		return contentMatcher{literal: pattern, ignoreCase: ignoreCase}, nil
+		pattern = regexp.QuoteMeta(pattern)
 	}
 	if ignoreCase {
 		pattern = "(?i)" + pattern
@@ -142,23 +147,29 @@ func newContentMatcher(pattern string, literal, ignoreCase bool) (contentMatcher
 	return contentMatcher{re: re}, nil
 }
 
-func (m contentMatcher) find(line string) (string, bool) {
+func (m contentMatcher) find(line string) (contentMatch, bool) {
 	if m.re != nil {
 		loc := m.re.FindStringIndex(line)
 		if loc == nil {
-			return "", false
+			return contentMatch{}, false
 		}
-		return line[loc[0]:loc[1]], true
+		return contentMatch{Text: line[loc[0]:loc[1]], StartByte: loc[0], EndByte: loc[1]}, true
 	}
-	haystack := line
-	if m.ignoreCase {
-		haystack = strings.ToLower(haystack)
-	}
-	idx := strings.Index(haystack, m.literal)
+	idx := strings.Index(line, m.literal)
 	if idx < 0 {
-		return "", false
+		return contentMatch{}, false
 	}
-	return line[idx : idx+len(m.literal)], true
+	return contentMatch{Text: line[idx : idx+len(m.literal)], StartByte: idx, EndByte: idx + len(m.literal)}, true
+}
+
+func runeColumnAtByte(line string, offset int) int {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(line) {
+		offset = len(line)
+	}
+	return utf8.RuneCountInString(line[:offset]) + 1
 }
 
 func searchTextFile(ctx context.Context, s *session, path string, matcher contentMatcher) error {
@@ -189,7 +200,7 @@ func searchTextFile(ctx context.Context, s *session, path string, matcher conten
 	if remaining == 0 {
 		return errStopSearch
 	}
-	matches := make(map[int]string)
+	matches := make(map[int]contentMatch)
 	for i, line := range lines {
 		match, ok := matcher.find(line)
 		if !ok {
@@ -224,12 +235,16 @@ func searchTextFile(ctx context.Context, s *session, path string, matcher conten
 			continue
 		}
 		if match, ok := matches[i]; ok {
-			if !s.add(Result{File: path, Line: i + 1, Match: match, Type: "content"}) {
+			if !s.add(Result{
+				File: path, Line: i + 1, Text: line, Match: match.Text,
+				Column: runeColumnAtByte(line, match.StartByte), EndColumn: runeColumnAtByte(line, match.EndByte),
+				Type: "content",
+			}) {
 				return errStopSearch
 			}
 			continue
 		}
-		if !s.add(Result{File: path, Line: i + 1, Match: line, Type: "content", IsContext: true}) {
+		if !s.add(Result{File: path, Line: i + 1, Text: line, Type: "content", IsContext: true}) {
 			return errStopSearch
 		}
 	}

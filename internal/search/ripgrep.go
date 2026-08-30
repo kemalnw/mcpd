@@ -147,6 +147,8 @@ type rgEvent struct {
 			Match struct {
 				Text string `json:"text"`
 			} `json:"match"`
+			Start int `json:"start"`
+			End   int `json:"end"`
 		} `json:"submatches"`
 	} `json:"data"`
 }
@@ -165,13 +167,20 @@ func parseRipgrepLine(line string, searchType Type) (Result, bool) {
 	}
 	switch event.Type {
 	case "match":
-		match := strings.TrimRight(event.Data.Lines.Text, "\r\n")
+		text := strings.TrimRight(event.Data.Lines.Text, "\r\n")
+		match := text
+		start, end := 0, len(text)
 		if len(event.Data.Submatches) > 0 && event.Data.Submatches[0].Match.Text != "" {
 			match = event.Data.Submatches[0].Match.Text
+			start = event.Data.Submatches[0].Start
+			end = event.Data.Submatches[0].End
 		}
-		return Result{File: event.Data.Path.Text, Line: event.Data.LineNumber, Match: match, Type: "content"}, true
+		return Result{
+			File: event.Data.Path.Text, Line: event.Data.LineNumber, Text: text, Match: match,
+			Column: runeColumnAtByte(text, start), EndColumn: runeColumnAtByte(text, end), Type: "content",
+		}, true
 	case "context":
-		return Result{File: event.Data.Path.Text, Line: event.Data.LineNumber, Match: strings.TrimRight(event.Data.Lines.Text, "\r\n"), Type: "content", IsContext: true}, true
+		return Result{File: event.Data.Path.Text, Line: event.Data.LineNumber, Text: strings.TrimRight(event.Data.Lines.Text, "\r\n"), Type: "content", IsContext: true}, true
 	default:
 		return Result{}, false
 	}

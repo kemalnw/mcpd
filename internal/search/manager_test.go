@@ -60,14 +60,27 @@ func TestNativeContentSearchLiteralRegexContextAndMaxResults(t *testing.T) {
 	if read.TotalMatches != 2 {
 		t.Fatalf("literal matches = %d, want 2: %#v", read.TotalMatches, read.Results)
 	}
-	matchLines := map[int]bool{}
+	matchLines := map[int]Result{}
+	contextLines := map[int]Result{}
 	for _, r := range read.Results {
-		if !r.IsContext {
-			matchLines[r.Line] = true
+		if r.IsContext {
+			contextLines[r.Line] = r
+			continue
 		}
+		matchLines[r.Line] = r
 	}
-	if !matchLines[2] || !matchLines[4] {
-		t.Fatalf("overlapping context lost a match: %#v", read.Results)
+	if _, ok := matchLines[2]; !ok {
+		t.Fatalf("overlapping context lost line 2 match: %#v", read.Results)
+	}
+	if _, ok := matchLines[4]; !ok {
+		t.Fatalf("overlapping context lost line 4 match: %#v", read.Results)
+	}
+	first := matchLines[2]
+	if first.Text != "Needle+One" || first.Match != "Needle+" || first.Column != 1 || first.EndColumn != 8 {
+		t.Fatalf("unexpected native literal match context/span: %#v", first)
+	}
+	if contextLines[3].Text != "middle" || contextLines[3].Match != "" || contextLines[3].Column != 0 || contextLines[3].EndColumn != 0 {
+		t.Fatalf("unexpected native context line: %#v", contextLines[3])
 	}
 
 	regex, err := m.Start(context.Background(), Options{
@@ -80,6 +93,29 @@ func TestNativeContentSearchLiteralRegexContextAndMaxResults(t *testing.T) {
 	regexRead := waitSearchComplete(t, m, regex.SessionID)
 	if regexRead.TotalMatches != 1 {
 		t.Fatalf("max results not enforced: %#v", regexRead)
+	}
+	if len(regexRead.Results) != 1 || regexRead.Results[0].Text != "Needle+One" || regexRead.Results[0].Match != "Needle+One" || regexRead.Results[0].Column != 1 || regexRead.Results[0].EndColumn != 11 {
+		t.Fatalf("unexpected native regex result: %#v", regexRead.Results)
+	}
+}
+
+func TestNativeContentSearchUnicodeColumns(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "unicode.txt"), "ππ needle café\n")
+	m := newNativeTestManager(t)
+	start, err := m.Start(context.Background(), Options{
+		RootPath: root, Pattern: "needle", SearchType: TypeContent, FilePattern: "*.txt", LiteralSearch: true, MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := waitSearchComplete(t, m, start.SessionID)
+	if len(read.Results) != 1 {
+		t.Fatalf("unexpected unicode result count: %#v", read.Results)
+	}
+	got := read.Results[0]
+	if got.Text != "ππ needle café" || got.Match != "needle" || got.Column != 4 || got.EndColumn != 10 {
+		t.Fatalf("unicode columns are not rune based: %#v", got)
 	}
 }
 
@@ -156,6 +192,36 @@ func TestRipgrepBackendWhenAvailable(t *testing.T) {
 	read := waitSearchComplete(t, m, start.SessionID)
 	if read.TotalMatches != 1 || len(read.Results) == 0 || read.Results[0].File == "" {
 		t.Fatalf("ripgrep result = %#v", read)
+	}
+	got := read.Results[0]
+	if got.Text != "hello needle world" || got.Match != "needle" || got.Column != 7 || got.EndColumn != 13 {
+		t.Fatalf("ripgrep result lacks full line/span: %#v", got)
+	}
+}
+
+func TestRipgrepUnicodeColumnsWhenAvailable(t *testing.T) {
+	rg, err := exec.LookPath("rg")
+	if err != nil {
+		t.Skip("ripgrep not installed")
+	}
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "unicode.txt"), "ππ needle café\n")
+	m, err := NewManager(ManagerOptions{RipgrepPath: rg, DefaultMaxResults: 100, Retention: time.Minute, InitialWait: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	start, err := m.Start(context.Background(), Options{RootPath: root, Pattern: "needle", SearchType: TypeContent, LiteralSearch: true, MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := waitSearchComplete(t, m, start.SessionID)
+	if len(read.Results) != 1 {
+		t.Fatalf("unexpected ripgrep unicode result count: %#v", read.Results)
+	}
+	got := read.Results[0]
+	if got.Text != "ππ needle café" || got.Match != "needle" || got.Column != 4 || got.EndColumn != 10 {
+		t.Fatalf("ripgrep unicode columns are not rune based: %#v", got)
 	}
 }
 
